@@ -6,9 +6,12 @@ import org.app.backend.Sender;
 import org.app.gui.theme.AppTheme;
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class FileSharingApp {
@@ -103,8 +106,7 @@ public class FileSharingApp {
             showAvailableReceivers(files);
         }
     }
-
-    private void showAvailableReceivers(File[] files){
+    private void showAvailableReceivers(File[] files) {
         // Create a custom dialog for receiver selection
         JDialog receiverDialog = new JDialog(frame, "Select Receiver", true);
         receiverDialog.setSize(300, 400);
@@ -115,29 +117,57 @@ public class FileSharingApp {
         receiverPanel.setLayout(new BoxLayout(receiverPanel, BoxLayout.Y_AXIS));
         receiverPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
         receiverPanel.setBackground(AppTheme.SECONDARY_COLOR);
-        availableReceivers = new ArrayList<>();
-        new Thread(()->{
-            new Sender().peerListener(availableReceivers,true);
-        }).start();
 
+        availableReceivers = Collections.synchronizedList(new ArrayList<>());
         ButtonGroup group = new ButtonGroup();
-     new Thread(()->{
-         if (availableReceivers.isEmpty()){
-             try {
-                 Thread.sleep(1000);
-             }catch (InterruptedException e){
-                 e.printStackTrace();
-             }
-         }
-         for (User receiver : availableReceivers) {
-             JRadioButton radioButton = new JRadioButton(receiver.getUsername());
-             radioButton.setFont(AppTheme.REGULAR_FONT);
-             radioButton.setBackground(AppTheme.SECONDARY_COLOR);
-             group.add(radioButton);
-             receiverPanel.add(radioButton);
-             receiverPanel.add(Box.createRigidArea(new Dimension(0, 10)));
-         }
-     }).start();
+        Sender sender = new Sender();
+
+        // SwingWorker to handle receiver discovery
+        SwingWorker<Void, User> worker = new SwingWorker<>() {
+            @Override
+            protected Void doInBackground() {
+
+                // Run peerListener in a separate thread
+                Thread discoveryThread = new Thread(() -> sender.peerListener(availableReceivers));
+                discoveryThread.start();
+
+                long startTime = System.currentTimeMillis();
+                while ((System.currentTimeMillis() - startTime) < 15000) {
+                    synchronized (availableReceivers) {
+                        for (User receiver : availableReceivers) {
+                            publish(receiver); // Publish each new receiver
+                        }
+                    }
+                    try {
+                        Thread.sleep(500); // Check every 500ms
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+
+                sender.setListening(false); // Stop listener after timeout
+                return null;
+            }
+
+            @Override
+            protected void process(List<User> users) {
+                receiverPanel.removeAll(); // Clear previous entries
+                for (User receiver : users) {
+                    System.out.println("adding to List " + receiver.getUsername());
+                    JRadioButton radioButton = new JRadioButton(receiver.getUsername());
+                    radioButton.setFont(AppTheme.REGULAR_FONT);
+                    radioButton.setBackground(AppTheme.SECONDARY_COLOR);
+                    group.add(radioButton);
+                    receiverPanel.add(radioButton);
+                    receiverPanel.add(Box.createRigidArea(new Dimension(0, 10)));
+                }
+                receiverPanel.revalidate(); // Refresh UI
+                receiverPanel.repaint();
+            }
+        };
+
+        worker.execute(); // Start discovering receivers
 
         JButton selectButton = AppTheme.createStyledButton("Select");
         selectButton.addActionListener(e -> {
@@ -145,14 +175,30 @@ public class FileSharingApp {
                 if (comp instanceof JRadioButton) {
                     JRadioButton radio = (JRadioButton) comp;
                     if (radio.isSelected()) {
-                        receiverDialog.dispose();
+                        String selectedReceiverName = radio.getText();
 
-                        confirmSend(radio.getText(), files);
+                        // Find the selected receiver's details
+                        User selectedReceiver = availableReceivers.stream()
+                                .filter(user -> user.getUsername().equals(selectedReceiverName))
+                                .findFirst()
+                                .orElse(null);
+
+                        if (selectedReceiver != null) {
+                            System.out.println("Sending connection request to: " + selectedReceiver.getUsername());
+
+                            // Call sendConnectionRequest before proceeding
+                            sender.sendConnectionRequest(selectedReceiver,user.getUsername(),fileInfo(files));
+
+                            // Proceed to file confirmation after connection request
+                            receiverDialog.dispose();
+//                            confirmSend(selectedReceiver.getUsername(), files);
+                        }
                         break;
                     }
                 }
             }
         });
+
 
         receiverDialog.add(new JScrollPane(receiverPanel), BorderLayout.CENTER);
         receiverDialog.add(selectButton, BorderLayout.SOUTH);
@@ -180,7 +226,8 @@ public class FileSharingApp {
                 JOptionPane.QUESTION_MESSAGE);
                 
         if (confirm == JOptionPane.YES_OPTION) {
-//            sendFiles(receiver, File[]);
+
+//               sendFiles(receiver, File[]);
         }
     }
 
@@ -228,14 +275,22 @@ public class FileSharingApp {
 
         user.setUsername(nameField.getText());
         System.out.println("starting boradcast");
-        new Thread(() -> {
-            new Receiver().peerBroadcaster(user.getUsername(),true);
-        }).start();
+        Receiver receiver = new Receiver();
+        new Thread(() -> receiver.peerBroadcaster(user.getUsername())).start();
+        new Thread(receiver::listenForConnectionRequests).start();
 
         JDialog waitDialog = new JDialog(frame, "Waiting for Connection", true);
         waitDialog.setSize(300, 150);
         waitDialog.setLocationRelativeTo(frame);
         waitDialog.setLayout(new BorderLayout(10, 10));
+        waitDialog.addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent e) {
+                receiver.setReceiving(false);
+                waitDialog.dispose(); // Close the dialog
+                System.out.println("User closed the dialog. Stopping broadcast and listener...");
+            }
+        });
 
         JPanel waitPanel = new JPanel(new BorderLayout(10, 10));
         waitPanel.setBorder(BorderFactory.createEmptyBorder(20, 20, 20, 20));
@@ -251,11 +306,15 @@ public class FileSharingApp {
         waitPanel.add(waitProgress, BorderLayout.SOUTH);
         
         JButton cancelButton = AppTheme.createStyledButton("Cancel");
-        cancelButton.addActionListener(e -> waitDialog.dispose());
+        cancelButton.addActionListener(e -> {
+            receiver.setReceiving(false);
+            waitDialog.dispose();
+        });
         
         waitDialog.add(waitPanel, BorderLayout.CENTER);
         waitDialog.add(cancelButton, BorderLayout.SOUTH);
         waitDialog.setVisible(true);
+
     }
 
     private void setSaveDirectory() {

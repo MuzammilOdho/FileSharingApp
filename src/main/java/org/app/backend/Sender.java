@@ -11,71 +11,81 @@ import java.net.Socket;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 public class Sender {
+    private volatile boolean isListening = true;
+
+    public void setListening(boolean listening) {
+        isListening = listening;
+    }
+
     private static final int LISTENING_PORT = 9000;
     private static final int CONNECTION_PORT = 9080;
-    void sendRequest(){
+
+    void sendRequest() {
 
     }
 
-    public void peerListener(List<User> discoveredReceivers,boolean isListening ){
+    public void peerListener(List<User> discoveredReceivers) {
         try {
-            System.out.println("sending peer " + discoveredReceivers.size());
+            System.out.println("Starting peer listener...");
+
+            // Open Datagram Channel and Bind to Listening Port
             DatagramChannel channel = DatagramChannel.open();
             channel.bind(new InetSocketAddress(LISTENING_PORT));
 
             ByteBuffer buffer = ByteBuffer.allocate(1024);
 
-
             while (isListening) {
-                System.out.printf("Listening on peer %d\n", LISTENING_PORT);
+                System.out.printf("Listening on port %d...\n", LISTENING_PORT);
+                buffer.clear();
+
+                // Receive Data from a Sender
                 SocketAddress address = channel.receive(buffer);
+                buffer.flip();
+
                 if (address instanceof InetSocketAddress inetSocketAddress) {
                     String receiverIP = inetSocketAddress.getAddress().getHostAddress();
-                    String receiverName = buffer.toString().trim();
+                    String receiverName = StandardCharsets.UTF_8.decode(buffer).toString().trim();
+
                     synchronized (discoveredReceivers) {
-                        if (!discoveredReceivers.contains(receiverIP)) {
+                        boolean exists = discoveredReceivers.stream()
+                                .anyMatch(user -> user.getIp().equals(receiverIP));
+
+                        if (!exists) {
                             discoveredReceivers.add(new User(receiverName, receiverIP));
-                            System.out.println("Discovered receiver: " + receiverIP);
+                            System.out.println("Discovered receiver: " + receiverName + " (" + receiverIP + ")");
                         }
                     }
                 }
-                try {
-                    Thread.sleep(500);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
+
+                Thread.sleep(1000); // Reduce CPU usage
             }
-        }catch (IOException e){
+
+            channel.close(); // Close channel when done
+        } catch (IOException | InterruptedException e) {
             e.printStackTrace();
         }
-
-
-
     }
 
-    public boolean connectionRequest(User receiver,String filesInfo){
 
-        try(  Socket socket = new Socket(receiver.getIp(), CONNECTION_PORT);) {
+    public boolean sendConnectionRequest(User receiver, String senderName,String fileInfo) {
+        try (Socket socket = new Socket(receiver.getIp(), CONNECTION_PORT);
+             PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
+             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
 
-            PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
-            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            writer.println("REQUEST_TO_SEND:"+ receiver.getUsername() + filesInfo);
-            System.out.println("Connection request sent to receiver.");
-            String reply =  reader.readLine();
-            if(reply.equals("Yes")){
-                return true;
-            }else if(reply.equals("No")){
-                return false;
-            }else
-                throw new IOException("ConnectionError");
+            // Send connection request
+            writer.println(senderName + " wants to send you :\n " + fileInfo);
 
-
-        }catch (IOException e){
-           e.printStackTrace();
+            // Wait for response (Yes or No)
+            String response = reader.readLine();
+            return "YES".equalsIgnoreCase(response);  // Proceed if accepted
+        } catch (IOException e) {
+            e.printStackTrace();
+            return false; // Connection failed
         }
-        return false;
     }
 }
+

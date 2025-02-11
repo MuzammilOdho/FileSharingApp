@@ -4,73 +4,96 @@ import javax.swing.*;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.net.InetSocketAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.net.StandardSocketOptions;
+import java.io.PrintWriter;
+import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
+import java.nio.charset.StandardCharsets;
 
 
 public class Receiver {
+    private volatile boolean isReceiving = true;
+
+    public void setReceiving(boolean receiving) {
+        isReceiving = receiving;
+    }
+
     private static final int CONNECTION_PORT = 9080;
     // The UDP port used for broadcast messages (choose one not in use)
     private static final int BROADCAST_PORT = 9000;
     // Message that identifies the peer as available (could include an ID, name, etc.)
     private static final String BROADCAST_IP = "255.255.255.255";
 
-    public void peerListener() throws IOException {
+
+    public void peerBroadcaster(String name) {
         try {
-            ServerSocket serverSocket = new ServerSocket(CONNECTION_PORT);
-            Socket socket = serverSocket.accept();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            while (true) {
-                String message = reader.readLine();
-                int confirm = JOptionPane.showConfirmDialog(null, "Accept file transfer request?\n" + message,
-                        "File Transfer Request", JOptionPane.YES_NO_OPTION);
+            System.out.println("Starting peer broadcaster: " + name);
 
-                if (confirm == JOptionPane.YES_OPTION) {
-                    System.out.println("Connection accepted. Ready to receive files.");
-
-                    // Proceed with file transfer
-                } else {
-                    System.out.println("Connection rejected.");
-                    continue;
-                }
-            }
-        }catch (IOException e){
-            e.printStackTrace();
-        }finally {
-
-        }
-    }
-
-    public void peerBroadcaster(String name,boolean isReceiving) {
-        try {
-            System.out.println("broadcasting peer " + name);
             DatagramChannel channel = DatagramChannel.open();
             channel.setOption(StandardSocketOptions.SO_BROADCAST, true);
-            channel.bind(new InetSocketAddress(BROADCAST_PORT));
 
-            ByteBuffer buffer = ByteBuffer.wrap(name.getBytes());
+            ByteBuffer buffer = ByteBuffer.wrap(name.getBytes(StandardCharsets.UTF_8));
             InetSocketAddress broadcastAddress = new InetSocketAddress(BROADCAST_IP, BROADCAST_PORT);
-            channel.connect(broadcastAddress);
 
             while (isReceiving) {
-                System.out.printf("Broadcasting on peer %d\n", broadcastAddress.getPort());
-                try {
-                    buffer.rewind();
-                    channel.send(buffer, broadcastAddress);
-                    Thread.sleep(1000);
+                System.out.printf("Broadcasting on port %d...\n", BROADCAST_PORT);
+                buffer.rewind();
+                channel.send(buffer, broadcastAddress);
 
+                try {
+                    Thread.sleep(1000); // Prevent spamming network
                 } catch (InterruptedException e) {
-                    e.printStackTrace();
+                    Thread.currentThread().interrupt();
+                    System.out.println("Broadcast interrupted");
+                    break;
                 }
             }
+
+            channel.close();
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
+
+
+    public void listenForConnectionRequests() {
+        try (ServerSocket serverSocket = new ServerSocket(CONNECTION_PORT)) {
+            serverSocket.setSoTimeout(1000); // 1-second timeout to check the isReceiving flag
+            System.out.println("Listening for connection requests on port " + CONNECTION_PORT);
+
+            while (isReceiving) {
+                try {
+                    Socket socket = serverSocket.accept(); // Accept connection
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                    PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
+
+                    String requestMessage = reader.readLine();
+                    int confirm = JOptionPane.showConfirmDialog(null, requestMessage,
+                            "Incoming Connection Request", JOptionPane.YES_NO_OPTION);
+
+                    if (confirm == JOptionPane.YES_OPTION) {
+                        writer.println("YES");
+
+                        isReceiving = false; // Stop broadcasting and accepting connections
+                        System.out.println("Connection accepted. Stopping broadcast...");
+
+                        break; // Exit loop after accepting connection
+
+                    } else {
+                        writer.println("NO");   // Reject connection and keep listening
+                        System.out.println("Connection rejected.");
+                    }
+                    socket.close();
+                } catch (SocketTimeoutException e) {
+                    // Timeout occurred, check isReceiving flag again
+                }
+            }
+            System.out.println("Stopping connection listener...");
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
 
 
 }
