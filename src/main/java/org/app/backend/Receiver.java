@@ -58,12 +58,12 @@ public class Receiver {
 
     public void listenForConnectionRequests() {
         try (ServerSocket serverSocket = new ServerSocket(CONNECTION_PORT)) {
-            serverSocket.setSoTimeout(1000); // 1-second timeout to check the isReceiving flag
+            serverSocket.setSoTimeout(2000); // 2-second timeout to check the isReceiving flag
             System.out.println("Listening for connection requests on port " + CONNECTION_PORT);
 
             while (isReceiving) {
                 try {
-                    Socket socket = serverSocket.accept(); // Accept connection
+                    Socket socket = serverSocket.accept(); //wait for any incoming connection for 2 second then check for isReceiving
                     BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                     PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
 

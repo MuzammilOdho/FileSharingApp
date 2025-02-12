@@ -9,7 +9,6 @@ import java.awt.*;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -22,7 +21,6 @@ public class FileSharingApp {
     private  User  user;
     private File[] files;
     private List<User> availableReceivers;
-    private String saveDirectory;
 
     public FileSharingApp() {
         frame = new JFrame("File Sharing App");
@@ -112,6 +110,7 @@ public class FileSharingApp {
         receiverDialog.setSize(300, 400);
         receiverDialog.setLocationRelativeTo(frame);
         receiverDialog.setLayout(new BorderLayout(10, 10));
+
 
         JPanel receiverPanel = new JPanel();
         receiverPanel.setLayout(new BoxLayout(receiverPanel, BoxLayout.Y_AXIS));

@@ -35,6 +35,8 @@ public class Sender {
             // Open Datagram Channel and Bind to Listening Port
             DatagramChannel channel = DatagramChannel.open();
             channel.bind(new InetSocketAddress(LISTENING_PORT));
+            channel.configureBlocking(false);
+
 
             ByteBuffer buffer = ByteBuffer.allocate(1024);
 
@@ -60,24 +62,30 @@ public class Sender {
                         }
                     }
                 }
+                try {
 
                 Thread.sleep(1000); // Reduce CPU usage
+                }catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    System.out.println("Peer listener interrupted");
+                }
             }
 
+            System.out.println("Stopping peer listener...");
             channel.close(); // Close channel when done
-        } catch (IOException | InterruptedException e) {
+        } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
 
-    public boolean sendConnectionRequest(User receiver, String senderName,String fileInfo) {
+    public boolean sendConnectionRequest(User receiver, String senderName, String fileInfo) {
         try (Socket socket = new Socket(receiver.getIp(), CONNECTION_PORT);
              PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
              BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
 
             // Send connection request
-            writer.println(senderName + " wants to send you :\n " + fileInfo);
+            writer.println(senderName + " wants to send you :" + fileInfo);
 
             // Wait for response (Yes or No)
             String response = reader.readLine();
