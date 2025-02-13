@@ -97,7 +97,7 @@ public class Sender {
             
             System.out.println("Calculated chunks: Total=" + totalChunks + ", Size=" + optimalChunkSize + " bytes");
             
-            // Send file metadata and wait for acknowledgment
+            // Send file metadata and wait for receiver to be ready
             try (Socket metadataSocket = new Socket(receiverIP, RECEIVER_PORT)) {
                 System.out.println("Connected to receiver for metadata on port " + RECEIVER_PORT);
                 DataOutputStream metadataOut = new DataOutputStream(metadataSocket.getOutputStream());
@@ -105,10 +105,10 @@ public class Sender {
                 
                 // Send metadata
                 metadataOut.writeLong(fileSize);
+                metadataOut.writeInt(totalChunks);
                 byte[] nameBytes = file.getName().getBytes(StandardCharsets.UTF_8);
                 metadataOut.writeInt(nameBytes.length);
                 metadataOut.write(nameBytes);
-                metadataOut.writeInt(totalChunks);
                 metadataOut.flush();
                 
                 // Wait for receiver to be ready
@@ -118,6 +118,9 @@ public class Sender {
                 }
                 System.out.println("Receiver ready to accept chunks");
             }
+
+            // Wait a bit to ensure all receiver sockets are set up
+            Thread.sleep(1000);
 
             // Create thread pool for chunk transfers
             ExecutorService chunkExecutor = Executors.newFixedThreadPool(

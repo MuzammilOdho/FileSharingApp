@@ -194,28 +194,24 @@ public class Receiver {
                            Consumer<Integer> progressCallback,
                            Consumer<String> statusCallback) {
         try {
-            System.out.println("Starting to receive file...");
             DataInputStream metadataIn = new DataInputStream(metadataSocket.getInputStream());
             PrintWriter metadataOut = new PrintWriter(metadataSocket.getOutputStream(), true);
             
             // Read file metadata
             long fileSize = metadataIn.readLong();
+            int totalChunks = metadataIn.readInt();
             int nameLength = metadataIn.readInt();
             byte[] nameBytes = new byte[nameLength];
             metadataIn.readFully(nameBytes);
             String fileName = new String(nameBytes, StandardCharsets.UTF_8);
-            int totalChunks = metadataIn.readInt();
 
             System.out.println("Receiving file: " + fileName + " (Size: " + fileSize + " bytes, Chunks: " + totalChunks + ")");
-
             File receivedFile = getUniqueFile(new File(saveDirectory, fileName));
-            statusCallback.accept("Receiving file: " + fileName);
-
+            
             // Create all server sockets first
             ServerSocket[] chunkServers = new ServerSocket[totalChunks];
             for (int i = 0; i < totalChunks; i++) {
                 chunkServers[i] = new ServerSocket(RECEIVING_PORT + 1 + i);
-                chunkServers[i].setSoTimeout(30000); // 30 seconds timeout
             }
 
             // Signal ready to receive chunks
