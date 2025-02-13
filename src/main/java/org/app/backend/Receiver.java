@@ -104,6 +104,10 @@ public class Receiver {
                 statusCallback.accept("Connection accepted. Waiting for sender...");
                 System.out.println("Connection accepted. Waiting for sender...");
 
+                // Stop broadcasting and receiving new connections
+                isReceiving = false;
+                System.out.println("Stopped broadcasting and receiving new connections");
+
                 // Create and start the file receiver server immediately
                 ServerSocket fileSocket = new ServerSocket(RECEIVING_PORT);
                 System.out.println("File receiver server started on port " + RECEIVING_PORT);
@@ -117,10 +121,22 @@ public class Receiver {
                 // Start receiving files in background
                 CompletableFuture.runAsync(() -> {
                     try {
-                        while (isReceiving) {
+                        // Changed while loop to do-while to ensure at least one file is received
+                        do {
                             System.out.println("Waiting for file transfer connection...");
                             Socket transferSocket = fileSocket.accept();
                             System.out.println("File transfer connection accepted");
+
+                            // Check for completion signal
+                            DataInputStream checkStream = new DataInputStream(transferSocket.getInputStream());
+                            long fileSize = checkStream.readLong();
+                            if (fileSize == -1) {
+                                System.out.println("Received completion signal");
+                                break;
+                            }
+
+                            // Reset stream position for actual file transfer
+                            transferSocket = fileSocket.accept();
 
                             // Show progress dialog
                             SwingUtilities.invokeLater(() -> {
@@ -139,7 +155,19 @@ public class Receiver {
                                     System.out.println("Status: " + status);
                                 })
                             );
-                        }
+                        } while (true);
+
+                        // Show completion message
+                        SwingUtilities.invokeLater(() -> {
+                            progressDialog.setCloseable(true);
+                            progressDialog.dispose();
+                            parentFrame.dispose();
+                            JOptionPane.showMessageDialog(null,
+                                "All files received successfully!",
+                                "Transfer Complete",
+                                JOptionPane.INFORMATION_MESSAGE);
+                        });
+
                     } catch (Exception e) {
                         System.err.println("Error in file transfer: " + e.getMessage());
                         e.printStackTrace();
@@ -147,6 +175,10 @@ public class Receiver {
                             progressDialog.setCloseable(true);
                             progressDialog.dispose();
                             parentFrame.dispose();
+                            JOptionPane.showMessageDialog(null,
+                                "Error receiving files: " + e.getMessage(),
+                                "Transfer Error",
+                                JOptionPane.ERROR_MESSAGE);
                         });
                     } finally {
                         try {

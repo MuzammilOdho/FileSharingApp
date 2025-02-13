@@ -133,7 +133,7 @@ public class FileTransferManager {
         return String.format("%.2f %s", fileSize, units[unitIndex]);
     }
     
-    public void startReceiving(String userName,String saveDirectory,
+    public void startReceiving(String userName, String saveDirectory,
                              Consumer<Integer> progressCallback,
                              Consumer<String> statusCallback) {
         this.currentSaveDirectory = saveDirectory;
@@ -143,13 +143,13 @@ public class FileTransferManager {
         receiver.setReceiving(true);
         
         // Start broadcaster in a separate thread
-        CompletableFuture.runAsync(() -> 
+        CompletableFuture<Void> broadcasterFuture = CompletableFuture.runAsync(() -> 
             receiver.peerBroadcaster(userName),
             transferExecutor
         );
         
         // Start connection listener in another thread
-        CompletableFuture.runAsync(() -> 
+        CompletableFuture<Void> listenerFuture = CompletableFuture.runAsync(() -> 
             receiver.listenForConnectionRequests(
                 this.currentSaveDirectory,
                 this.progressCallback,
@@ -157,10 +157,13 @@ public class FileTransferManager {
             ), 
             transferExecutor
         );
-        
-        // Schedule periodic cleanup of inactive connections
-        scheduledExecutor.scheduleAtFixedRate(this::cleanupInactiveConnections, 
-            1, 1, TimeUnit.MINUTES);
+
+        // Handle completion
+        CompletableFuture.allOf(broadcasterFuture, listenerFuture)
+            .thenRun(() -> {
+                System.out.println("File transfer session completed");
+                statusCallback.accept("Transfer session ended");
+            });
     }
     
     private void cleanupInactiveConnections() {
