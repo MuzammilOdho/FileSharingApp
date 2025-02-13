@@ -2,10 +2,7 @@ package org.app.backend;
 
 import org.app.User;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
+import java.io.*;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketAddress;
@@ -23,7 +20,8 @@ public class Sender {
 
     private static final int LISTENING_PORT = 9000;
     private static final int CONNECTION_PORT = 9080;
-
+    private static final int RECEIVER_PORT = 9090;
+    private static final int BUFFER_SIZE = 8192;
     void sendRequest() {
 
     }
@@ -93,6 +91,37 @@ public class Sender {
         } catch (IOException e) {
             e.printStackTrace();
             return false; // Connection failed
+        }
+    }
+
+    public void sendFile(String receiverIP, File file) {
+        try (Socket socket = new Socket(receiverIP, RECEIVER_PORT);
+             DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
+             FileInputStream fis = new FileInputStream(file)) {
+
+            // Send file name and size
+            dos.writeUTF(file.getName());
+            dos.writeLong(file.length());
+
+            byte[] buffer = new byte[BUFFER_SIZE];
+            int bytesRead;
+            long totalBytesSent = 0;
+            long fileSize = file.length();
+
+            System.out.println("Sending " + file.getName());
+
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                dos.write(buffer, 0, bytesRead);
+                totalBytesSent += bytesRead;
+
+                // Print progress
+                int progress = (int) ((totalBytesSent * 100) / fileSize);
+                System.out.print("\rProgress: " + progress + "%");
+            }
+
+            System.out.println("\nFile sent: " + file.getName());
+        } catch (IOException e) {
+            e.printStackTrace();
         }
     }
 }

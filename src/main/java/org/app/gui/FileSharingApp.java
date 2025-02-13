@@ -12,6 +12,8 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class FileSharingApp {
     private JFrame frame;
@@ -133,6 +135,7 @@ public class FileSharingApp {
                 long startTime = System.currentTimeMillis();
                 while ((System.currentTimeMillis() - startTime) < 15000) {
                     synchronized (availableReceivers) {
+                        System.out.println(Thread.currentThread().getName());
                         for (User receiver : availableReceivers) {
                             publish(receiver); // Publish each new receiver
                         }
@@ -145,7 +148,8 @@ public class FileSharingApp {
                     }
                 }
 
-                sender.setListening(false); // Stop listener after timeout
+                sender.setListening(false);// Stop listener after timeout
+                receiverDialog.dispose();
                 return null;
             }
 
@@ -167,7 +171,7 @@ public class FileSharingApp {
         };
 
         worker.execute(); // Start discovering receivers
-
+        System.out.println("Main" + Thread.currentThread().getName());
         JButton selectButton = AppTheme.createStyledButton("Select");
         selectButton.addActionListener(e -> {
             for (Component comp : receiverPanel.getComponents()) {
@@ -185,12 +189,14 @@ public class FileSharingApp {
                         if (selectedReceiver != null) {
                             System.out.println("Sending connection request to: " + selectedReceiver.getUsername());
 
-                            // Call sendConnectionRequest before proceeding
-                            sender.sendConnectionRequest(selectedReceiver,user.getUsername(),fileInfo(files));
+                            if (confirmSend(selectedReceiver.getUsername(), files)) {
+                                if (sender.sendConnectionRequest(selectedReceiver, user.getUsername(), fileInfo(files))) {
+                                    receiverDialog.dispose();
+                                    sendFiles(selectedReceiver.getUsername(), files);
+                                }
+                            }
 
                             // Proceed to file confirmation after connection request
-                            receiverDialog.dispose();
-//                            confirmSend(selectedReceiver.getUsername(), files);
                         }
                         break;
                     }
@@ -216,18 +222,15 @@ public class FileSharingApp {
         fileInfo.append("</body></html>");
         return fileInfo.toString();
     }
-    private void confirmSend(String receiver,File[] files) {
+    private boolean confirmSend(String receiver,File[] files) {
                String  fileInfo = fileInfo(files);
         int confirm = JOptionPane.showConfirmDialog(frame,
                 new JLabel(fileInfo),
                 "Send files to " + receiver + "?",
                 JOptionPane.YES_NO_OPTION,
                 JOptionPane.QUESTION_MESSAGE);
-                
-        if (confirm == JOptionPane.YES_OPTION) {
 
-//               sendFiles(receiver, File[]);
-        }
+         return (confirm == JOptionPane.YES_OPTION);
     }
 
     private String formatFileSize(long size) {
@@ -246,23 +249,11 @@ public class FileSharingApp {
     private void sendFiles(String receiver, File[] files) {
         progressDialog = new TransferProgressDialog(frame, "Sending Files");
         progressDialog.setVisible(true);
-        
-        // Simulate file transfer (replace with actual transfer logic)
-        new Thread(() -> {
-            for (int i = 0; i <= 100; i++) {
-                final int progress = i;
-                SwingUtilities.invokeLater(() -> progressDialog.updateProgress(progress));
-                try {
-                    Thread.sleep(50);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
+        try (ExecutorService executor = Executors.newFixedThreadPool(files.length)) {
+            for (File file : files) {
+                executor.execute(()->new Sender().sendFile(receiver, file));
             }
-            SwingUtilities.invokeLater(() -> {
-                progressDialog.dispose();
-                JOptionPane.showMessageDialog(frame, "Files sent successfully!");
-            });
-        }).start();
+        }
     }
 
     private void waitForIncomingConnection() {
@@ -315,6 +306,7 @@ public class FileSharingApp {
         waitDialog.setVisible(true);
 
     }
+
 
     private void setSaveDirectory() {
         JFileChooser fileChooser = new JFileChooser();

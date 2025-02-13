@@ -1,10 +1,7 @@
 package org.app.backend;
 
 import javax.swing.*;
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
+import java.io.*;
 import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
@@ -18,6 +15,8 @@ public class Receiver {
         isReceiving = receiving;
     }
 
+    private static final int RECEIVING_PORT = 9090;
+    private static final int BUFFER_SIZE = 8192;
     private static final int CONNECTION_PORT = 9080;
     // The UDP port used for broadcast messages (choose one not in use)
     private static final int BROADCAST_PORT = 9000;
@@ -92,8 +91,39 @@ public class Receiver {
         } catch (IOException e) {
             e.printStackTrace();
         }
+
     }
 
+    private static void receiveFile(Socket socket,String saveDirectory){
+        try (DataInputStream dis = new DataInputStream(socket.getInputStream())) {
+            String fileName = dis.readUTF();
+            long fileSize = dis.readLong();
 
+            File receivedFile = new File(saveDirectory + fileName);
+
+            // Prevent overwriting
+            int count = 1;
+            while (receivedFile.exists()) {
+                String newFileName = fileName.replaceFirst("(\\.[^.]+)$", "_" + count + "$1");
+                receivedFile = new File(saveDirectory + newFileName);
+                count++;
+            }
+
+            byte[] buffer = new byte[BUFFER_SIZE];
+            try (FileOutputStream fos = new FileOutputStream(receivedFile)) {
+                int bytesRead;
+                long totalBytesRead = 0;
+
+                while ((bytesRead = dis.read(buffer)) != -1) {
+                    fos.write(buffer, 0, bytesRead);
+                    totalBytesRead += bytesRead;
+                    if (totalBytesRead >= fileSize) break;
+                }
+                System.out.println("\nFile received: " + receivedFile.getAbsolutePath());
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
 
 }
