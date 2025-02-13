@@ -23,7 +23,7 @@ public class Receiver {
     }
 
     private static final int RECEIVING_PORT = 9090;
-    private static final int BUFFER_SIZE = 32768;
+    private static final int BUFFER_SIZE = 1024 * 1024;
     private static final int CONNECTION_PORT = 9080;
     // The UDP port used for broadcast messages (choose one not in use)
     private static final int BROADCAST_PORT = 9000;

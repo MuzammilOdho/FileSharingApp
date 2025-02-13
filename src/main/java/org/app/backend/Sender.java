@@ -26,7 +26,7 @@ public class Sender {
     private static final int LISTENING_PORT = 9000;
     private static final int CONNECTION_PORT = 9080;
     private static final int RECEIVER_PORT = 9090;
-    private static final int BUFFER_SIZE = 32768;
+    private static final int BUFFER_SIZE = 1024 * 1024;
     void sendRequest() {
 
     }
@@ -197,8 +197,13 @@ public class Sender {
 
     private int calculateOptimalChunkSize(long fileSize) {
         int availableProcessors = Runtime.getRuntime().availableProcessors();
-        long optimalChunks = Math.min(availableProcessors * 2, fileSize / (1024 * 1024)); // Min 1MB per chunk
-        return (int) Math.max(1024 * 1024, fileSize / Math.max(1, optimalChunks));
+        // Calculate optimal chunks based on CPU cores and file size
+        int optimalChunks = Math.min(availableProcessors * 4, (int)(fileSize / 4*1024*1024));
+        if (optimalChunks < 1) optimalChunks = 1;
+        
+        // Ensure minimum chunk size of 4MB
+        return (int) Math.max(4*1024*1024, fileSize / optimalChunks);
     }
+
 }
 
