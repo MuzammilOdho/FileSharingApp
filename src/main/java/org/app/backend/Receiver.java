@@ -23,7 +23,7 @@ public class Receiver {
     }
 
     private static final int RECEIVING_PORT = 9090;
-    private static final int BUFFER_SIZE = 1024 * 1024;
+    private static final int BUFFER_SIZE = 8 * 1024 * 1024; // 8MB buffer size
     private static final int CONNECTION_PORT = 9080;
     // The UDP port used for broadcast messages (choose one not in use)
     private static final int BROADCAST_PORT = 9000;
@@ -104,41 +104,33 @@ public class Receiver {
                 statusCallback.accept("Connection accepted. Waiting for sender...");
                 System.out.println("Connection accepted. Waiting for sender...");
 
-                // Stop broadcasting and receiving new connections
-                isReceiving = false;
-                System.out.println("Stopped broadcasting and receiving new connections");
-
-                // Create and start the file receiver server immediately
+                // Create new socket for file transfer
                 ServerSocket fileSocket = new ServerSocket(RECEIVING_PORT);
-                System.out.println("File receiver server started on port " + RECEIVING_PORT);
+                fileSocket.setSoTimeout(30000); // 30 seconds timeout
 
-                // Create progress dialog
+                // Create progress dialog but don't show it yet
                 JFrame parentFrame = new JFrame();
                 TransferProgressDialog progressDialog = new TransferProgressDialog(
                     parentFrame, "Receiving Files");
                 progressDialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
 
-                // Start receiving files in background
+                // Keep receiving files until transfer is complete
                 CompletableFuture.runAsync(() -> {
                     try {
-                        // Changed while loop to do-while to ensure at least one file is received
-                        do {
+                        while (isReceiving) {
                             System.out.println("Waiting for file transfer connection...");
                             Socket transferSocket = fileSocket.accept();
                             System.out.println("File transfer connection accepted");
 
                             // Check for completion signal
-                            DataInputStream checkStream = new DataInputStream(transferSocket.getInputStream());
-                            long fileSize = checkStream.readLong();
+                            DataInputStream metadataIn = new DataInputStream(transferSocket.getInputStream());
+                            long fileSize = metadataIn.readLong();
                             if (fileSize == -1) {
                                 System.out.println("Received completion signal");
                                 break;
                             }
 
-                            // Reset stream position for actual file transfer
-                            transferSocket = fileSocket.accept();
-
-                            // Show progress dialog
+                            // Show progress dialog for each file
                             SwingUtilities.invokeLater(() -> {
                                 progressDialog.setVisible(true);
                                 progressDialog.updateProgress(0);
@@ -155,22 +147,12 @@ public class Receiver {
                                     System.out.println("Status: " + status);
                                 })
                             );
-                        } while (true);
-
-                        // Show completion message
-                        SwingUtilities.invokeLater(() -> {
-                            progressDialog.setCloseable(true);
-                            progressDialog.dispose();
-                            parentFrame.dispose();
-                            JOptionPane.showMessageDialog(null,
-                                "All files received successfully!",
-                                "Transfer Complete",
-                                JOptionPane.INFORMATION_MESSAGE);
-                        });
-
+                        }
+                    } catch (SocketTimeoutException e) {
+                        // Ignore timeout after completion signal
+                        System.out.println("Transfer completed");
                     } catch (Exception e) {
                         System.err.println("Error in file transfer: " + e.getMessage());
-                        e.printStackTrace();
                         SwingUtilities.invokeLater(() -> {
                             progressDialog.setCloseable(true);
                             progressDialog.dispose();
@@ -180,15 +162,24 @@ public class Receiver {
                                 "Transfer Error",
                                 JOptionPane.ERROR_MESSAGE);
                         });
+                        e.printStackTrace();
                     } finally {
                         try {
                             fileSocket.close();
                         } catch (IOException e) {
                             e.printStackTrace();
                         }
+                        SwingUtilities.invokeLater(() -> {
+                            progressDialog.setCloseable(true);
+                            progressDialog.dispose();
+                            parentFrame.dispose();
+                            JOptionPane.showMessageDialog(null,
+                                "All files received successfully!",
+                                "Transfer Complete",
+                                JOptionPane.INFORMATION_MESSAGE);
+                        });
                     }
                 });
-
             } else {
                 writer.println("NO");
                 statusCallback.accept("Connection rejected.");
@@ -244,6 +235,10 @@ public class Receiver {
                     try (ServerSocket chunkServer = chunkServers[chunkIndex]) {
                         System.out.println("Waiting for chunk " + chunkIndex + " on port " + (RECEIVING_PORT + 1 + chunkIndex));
                         Socket chunkSocket = chunkServer.accept();
+                        chunkSocket.setTcpNoDelay(true);
+                        chunkSocket.setReceiveBufferSize(BUFFER_SIZE);
+                        chunkSocket.setSendBufferSize(BUFFER_SIZE);
+                        chunkSocket.setPerformancePreferences(0, 1, 2);
                         DataInputStream chunkIn = new DataInputStream(chunkSocket.getInputStream());
                         
                         // Read chunk metadata

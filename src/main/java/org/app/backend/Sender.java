@@ -26,7 +26,7 @@ public class Sender {
     private static final int LISTENING_PORT = 9000;
     private static final int CONNECTION_PORT = 9080;
     private static final int RECEIVER_PORT = 9090;
-    private static final int BUFFER_SIZE = 1024 * 1024;
+    private static final int BUFFER_SIZE = 8 * 1024 * 1024; // 8MB buffer size
     void sendRequest() {
 
     }
@@ -156,6 +156,13 @@ public class Sender {
                             }
                             System.out.println("Completed sending chunk " + chunkIndex);
                         }
+
+                        // Set socket performance preferences
+                        chunkSocket.setTcpNoDelay(true);
+                        chunkSocket.setReceiveBufferSize(BUFFER_SIZE);
+                        chunkSocket.setSendBufferSize(BUFFER_SIZE);
+                        chunkSocket.setPerformancePreferences(0, 1, 2); // Prioritize bandwidth over latency and connection time
+
                         return chunkIndex;
                     }
                 });
@@ -198,12 +205,12 @@ public class Sender {
     private int calculateOptimalChunkSize(long fileSize) {
         int availableProcessors = Runtime.getRuntime().availableProcessors();
         // Calculate optimal chunks based on CPU cores and file size
-        int optimalChunks = Math.min(availableProcessors * 4, (int)(fileSize / 4*1024*1024));
+        // Use larger chunks for better throughput
+        int optimalChunks = Math.min(availableProcessors * 2, (int)(fileSize / (16 * 1024 * 1024))); // 16MB minimum chunk size
         if (optimalChunks < 1) optimalChunks = 1;
         
-        // Ensure minimum chunk size of 4MB
-        return (int) Math.max(4*1024*1024, fileSize / optimalChunks);
+        // Ensure minimum chunk size of 16MB for better performance
+        return (int) Math.max(16 * 1024 * 1024, fileSize / optimalChunks);
     }
-
 }
 
