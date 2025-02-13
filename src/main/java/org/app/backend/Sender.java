@@ -8,8 +8,13 @@ import java.net.Socket;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
+import java.nio.channels.FileChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.*;
+import java.util.function.Consumer;
+import javax.swing.SwingUtilities;
 
 public class Sender {
     private volatile boolean isListening = true;
@@ -21,57 +26,46 @@ public class Sender {
     private static final int LISTENING_PORT = 9000;
     private static final int CONNECTION_PORT = 9080;
     private static final int RECEIVER_PORT = 9090;
-    private static final int BUFFER_SIZE = 8192;
+    private static final int BUFFER_SIZE = 32768;
     void sendRequest() {
 
     }
 
-    public void peerListener(List<User> discoveredReceivers) {
+    public void peerListener(List<User> discoveredReceivers, Consumer<User> onNewUser) {
         try {
             System.out.println("Starting peer listener...");
 
-            // Open Datagram Channel and Bind to Listening Port
-            DatagramChannel channel = DatagramChannel.open();
-            channel.bind(new InetSocketAddress(LISTENING_PORT));
-            channel.configureBlocking(false);
+            try (DatagramChannel channel = DatagramChannel.open()) {
+                channel.bind(new InetSocketAddress(LISTENING_PORT));
+                channel.configureBlocking(false);
 
+                ByteBuffer buffer = ByteBuffer.allocate(1024);
 
-            ByteBuffer buffer = ByteBuffer.allocate(1024);
+                while (isListening) {
+                    buffer.clear();
+                    SocketAddress address = channel.receive(buffer);
+                    
+                    if (address instanceof InetSocketAddress inetSocketAddress) {
+                        buffer.flip();
+                        String receiverIP = inetSocketAddress.getAddress().getHostAddress();
+                        String receiverName = StandardCharsets.UTF_8.decode(buffer).toString().trim();
 
-            while (isListening) {
-                System.out.printf("Listening on port %d...\n", LISTENING_PORT);
-                buffer.clear();
-
-                // Receive Data from a Sender
-                SocketAddress address = channel.receive(buffer);
-                buffer.flip();
-
-                if (address instanceof InetSocketAddress inetSocketAddress) {
-                    String receiverIP = inetSocketAddress.getAddress().getHostAddress();
-                    String receiverName = StandardCharsets.UTF_8.decode(buffer).toString().trim();
-
-                    synchronized (discoveredReceivers) {
                         boolean exists = discoveredReceivers.stream()
                                 .anyMatch(user -> user.getIp().equals(receiverIP));
 
                         if (!exists) {
-                            discoveredReceivers.add(new User(receiverName, receiverIP));
-                            System.out.println("Discovered receiver: " + receiverName + " (" + receiverIP + ")");
+                            User newUser = new User(receiverName, receiverIP);
+                            onNewUser.accept(newUser);
                         }
                     }
-                }
-                try {
 
-                Thread.sleep(1000); // Reduce CPU usage
-                }catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    System.out.println("Peer listener interrupted");
+                    Thread.sleep(100);
                 }
+                System.out.println("Peer listener stopped.");
             }
-
-            System.out.println("Stopping peer listener...");
-            channel.close(); // Close channel when done
-        } catch (IOException e) {
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            System.err.println("Peer listener error: " + e.getMessage());
             e.printStackTrace();
         }
     }
@@ -94,35 +88,117 @@ public class Sender {
         }
     }
 
-    public void sendFile(String receiverIP, File file) {
-        try (Socket socket = new Socket(receiverIP, RECEIVER_PORT);
-             DataOutputStream dos = new DataOutputStream(socket.getOutputStream());
-             FileInputStream fis = new FileInputStream(file)) {
-
-            // Send file name and size
-            dos.writeUTF(file.getName());
-            dos.writeLong(file.length());
-
-            byte[] buffer = new byte[BUFFER_SIZE];
-            int bytesRead;
-            long totalBytesSent = 0;
+    public void sendFile(String receiverIP, File file, Consumer<Integer> progressCallback) {
+        try {
+            System.out.println("Starting to send file: " + file.getName() + " (Size: " + file.length() + " bytes)");
             long fileSize = file.length();
-
-            System.out.println("Sending " + file.getName());
-
-            while ((bytesRead = fis.read(buffer)) != -1) {
-                dos.write(buffer, 0, bytesRead);
-                totalBytesSent += bytesRead;
-
-                // Print progress
-                int progress = (int) ((totalBytesSent * 100) / fileSize);
-                System.out.print("\rProgress: " + progress + "%");
+            int optimalChunkSize = calculateOptimalChunkSize(fileSize);
+            int totalChunks = (int) Math.ceil((double) fileSize / optimalChunkSize);
+            
+            System.out.println("Calculated chunks: Total=" + totalChunks + ", Size=" + optimalChunkSize + " bytes");
+            
+            // Send file metadata and wait for acknowledgment
+            try (Socket metadataSocket = new Socket(receiverIP, RECEIVER_PORT)) {
+                System.out.println("Connected to receiver for metadata on port " + RECEIVER_PORT);
+                DataOutputStream metadataOut = new DataOutputStream(metadataSocket.getOutputStream());
+                BufferedReader metadataIn = new BufferedReader(new InputStreamReader(metadataSocket.getInputStream()));
+                
+                // Send metadata
+                metadataOut.writeLong(fileSize);
+                byte[] nameBytes = file.getName().getBytes(StandardCharsets.UTF_8);
+                metadataOut.writeInt(nameBytes.length);
+                metadataOut.write(nameBytes);
+                metadataOut.writeInt(totalChunks);
+                metadataOut.flush();
+                
+                // Wait for receiver to be ready
+                String response = metadataIn.readLine();
+                if (!"READY".equals(response)) {
+                    throw new IOException("Receiver not ready: " + response);
+                }
+                System.out.println("Receiver ready to accept chunks");
             }
 
-            System.out.println("\nFile sent: " + file.getName());
-        } catch (IOException e) {
+            // Create thread pool for chunk transfers
+            ExecutorService chunkExecutor = Executors.newFixedThreadPool(
+                Math.min(Runtime.getRuntime().availableProcessors(), totalChunks));
+            CompletionService<Integer> completionService = new ExecutorCompletionService<>(chunkExecutor);
+
+            System.out.println("Starting chunk transfers...");
+            // Submit chunk transfer tasks
+            for (int i = 0; i < totalChunks; i++) {
+                final int chunkIndex = i;
+                long startPosition = (long) i * optimalChunkSize;
+                int currentChunkSize = (int) Math.min(optimalChunkSize, fileSize - startPosition);
+
+                completionService.submit(() -> {
+                    try (Socket chunkSocket = new Socket(receiverIP, RECEIVER_PORT + 1 + chunkIndex)) {
+                        System.out.println("Sending chunk " + chunkIndex + " on port " + (RECEIVER_PORT + 1 + chunkIndex));
+                        DataOutputStream chunkOut = new DataOutputStream(chunkSocket.getOutputStream());
+                        
+                        // Send chunk metadata
+                        chunkOut.writeInt(chunkIndex);
+                        chunkOut.writeLong(startPosition);
+                        chunkOut.writeInt(currentChunkSize);
+                        
+                        // Send chunk data
+                        try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+                            raf.seek(startPosition);
+                            byte[] buffer = new byte[BUFFER_SIZE];
+                            int totalBytesRead = 0;
+                            
+                            while (totalBytesRead < currentChunkSize) {
+                                int bytesRead = raf.read(buffer, 0, 
+                                    Math.min(buffer.length, currentChunkSize - totalBytesRead));
+                                if (bytesRead == -1) break;
+                                chunkOut.write(buffer, 0, bytesRead);
+                                totalBytesRead += bytesRead;
+                            }
+                            System.out.println("Completed sending chunk " + chunkIndex);
+                        }
+                        return chunkIndex;
+                    }
+                });
+            }
+
+            // Track progress
+            int completedChunks = 0;
+            while (completedChunks < totalChunks) {
+                try {
+                    Future<Integer> completedChunk = completionService.take();
+                    completedChunks++;
+                    
+                    // Update progress
+                    int progress = (int) ((completedChunks * 100.0) / totalChunks);
+                    System.out.println("Progress: " + progress + "% (" + completedChunks + "/" + totalChunks + " chunks)");
+                    SwingUtilities.invokeLater(() -> progressCallback.accept(progress));
+                } catch (Exception e) {
+                    System.err.println("Error tracking progress: " + e.getMessage());
+                    e.printStackTrace();
+                }
+            }
+
+            chunkExecutor.shutdown();
+            System.out.println("File sent successfully: " + file.getName());
+            
+            // Send completion signal
+            try (Socket completionSocket = new Socket(receiverIP, RECEIVER_PORT)) {
+                DataOutputStream completionOut = new DataOutputStream(completionSocket.getOutputStream());
+                completionOut.writeLong(-1); // Signal for completion
+                System.out.println("Sent completion signal");
+            }
+            
+        } catch (Exception e) {
+            System.err.println("Error in sendFile: " + e.getMessage());
             e.printStackTrace();
+            throw new RuntimeException(e);
         }
+    }
+
+    private int calculateOptimalChunkSize(long fileSize) {
+        int availableProcessors = Runtime.getRuntime().availableProcessors();
+        long optimalChunks = Math.min(availableProcessors * 2, fileSize / (1024 * 1024)); // Min 1MB per chunk
+        return (int) Math.max(1024 * 1024, fileSize / Math.max(1, optimalChunks));
     }
 }
 

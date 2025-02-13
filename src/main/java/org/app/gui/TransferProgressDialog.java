@@ -3,14 +3,32 @@ package org.app.gui;
 import org.app.gui.theme.AppTheme;
 import javax.swing.*;
 import java.awt.*;
+import java.awt.event.WindowAdapter;
+import java.awt.event.WindowEvent;
 
 public class TransferProgressDialog extends JDialog {
     private JProgressBar progressBar;
     private JLabel statusLabel;
+    private boolean isCloseable = false;
     
     public TransferProgressDialog(JFrame parent, String title) {
         super(parent, title, true);
         initComponents();
+        
+        // Handle window closing
+        addWindowListener(new WindowAdapter() {
+            @Override
+            public void windowClosing(WindowEvent e) {
+                if (isCloseable) {
+                    dispose();
+                } else {
+                    JOptionPane.showMessageDialog(TransferProgressDialog.this,
+                        "Please wait for the transfer to complete.",
+                        "Transfer in Progress",
+                        JOptionPane.WARNING_MESSAGE);
+                }
+            }
+        });
     }
     
     private void initComponents() {
@@ -41,5 +59,9 @@ public class TransferProgressDialog extends JDialog {
     
     public void setStatus(String status) {
         statusLabel.setText(status);
+    }
+    
+    public void setCloseable(boolean closeable) {
+        this.isCloseable = closeable;
     }
 } 
