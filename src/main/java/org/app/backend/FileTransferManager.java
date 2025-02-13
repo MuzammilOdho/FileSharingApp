@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Set;
+import java.net.Socket;
 
 public class FileTransferManager {
     private final Sender sender;
@@ -37,9 +38,26 @@ public class FileTransferManager {
                 discoveryFuture.get(5, TimeUnit.SECONDS); // Wait up to 5 seconds
             }
             System.out.println("Discovery stopped, sending connection request...");
-            return sender.sendConnectionRequest(receiver, senderName, getFileInfo(files));
+            
+            // Send connection request and wait for confirmation
+            boolean accepted = sender.sendConnectionRequest(receiver, senderName, getFileInfo(files));
+            
+            if (accepted) {
+                // Wait a bit to ensure receiver is ready
+                Thread.sleep(1000);
+                
+                // Test connection to receiver
+                try (Socket testSocket = new Socket(receiver.getIp(), 9090)) {
+                    System.out.println("Connection test successful");
+                    return true;
+                } catch (Exception e) {
+                    System.err.println("Connection test failed: " + e.getMessage());
+                    return false;
+                }
+            }
+            return false;
         } catch (Exception e) {
-            System.err.println("Error stopping discovery: " + e.getMessage());
+            System.err.println("Error in connection request: " + e.getMessage());
             return false;
         }
     }

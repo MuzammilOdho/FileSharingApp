@@ -104,17 +104,17 @@ public class Receiver {
                 statusCallback.accept("Connection accepted. Waiting for sender...");
                 System.out.println("Connection accepted. Waiting for sender...");
 
-                // Create new socket for file transfer
+                // Create and start the file receiver server immediately
                 ServerSocket fileSocket = new ServerSocket(RECEIVING_PORT);
-                fileSocket.setSoTimeout(30000); // 30 seconds timeout
+                System.out.println("File receiver server started on port " + RECEIVING_PORT);
 
-                // Create progress dialog but don't show it yet
+                // Create progress dialog
                 JFrame parentFrame = new JFrame();
                 TransferProgressDialog progressDialog = new TransferProgressDialog(
                     parentFrame, "Receiving Files");
                 progressDialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
 
-                // Keep receiving files until transfer is complete
+                // Start receiving files in background
                 CompletableFuture.runAsync(() -> {
                     try {
                         while (isReceiving) {
@@ -122,15 +122,7 @@ public class Receiver {
                             Socket transferSocket = fileSocket.accept();
                             System.out.println("File transfer connection accepted");
 
-                            // Check for completion signal
-                            DataInputStream metadataIn = new DataInputStream(transferSocket.getInputStream());
-                            long fileSize = metadataIn.readLong();
-                            if (fileSize == -1) {
-                                System.out.println("Received completion signal");
-                                break;
-                            }
-
-                            // Show progress dialog for each file
+                            // Show progress dialog
                             SwingUtilities.invokeLater(() -> {
                                 progressDialog.setVisible(true);
                                 progressDialog.updateProgress(0);
@@ -148,38 +140,23 @@ public class Receiver {
                                 })
                             );
                         }
-                    } catch (SocketTimeoutException e) {
-                        // Ignore timeout after completion signal
-                        System.out.println("Transfer completed");
                     } catch (Exception e) {
                         System.err.println("Error in file transfer: " + e.getMessage());
+                        e.printStackTrace();
                         SwingUtilities.invokeLater(() -> {
                             progressDialog.setCloseable(true);
                             progressDialog.dispose();
                             parentFrame.dispose();
-                            JOptionPane.showMessageDialog(null,
-                                "Error receiving files: " + e.getMessage(),
-                                "Transfer Error",
-                                JOptionPane.ERROR_MESSAGE);
                         });
-                        e.printStackTrace();
                     } finally {
                         try {
                             fileSocket.close();
                         } catch (IOException e) {
                             e.printStackTrace();
                         }
-                        SwingUtilities.invokeLater(() -> {
-                            progressDialog.setCloseable(true);
-                            progressDialog.dispose();
-                            parentFrame.dispose();
-                            JOptionPane.showMessageDialog(null,
-                                "All files received successfully!",
-                                "Transfer Complete",
-                                JOptionPane.INFORMATION_MESSAGE);
-                        });
                     }
                 });
+
             } else {
                 writer.println("NO");
                 statusCallback.accept("Connection rejected.");
