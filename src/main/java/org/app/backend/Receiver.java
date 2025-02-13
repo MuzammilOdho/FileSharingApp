@@ -104,71 +104,74 @@ public class Receiver {
                 statusCallback.accept("Connection accepted. Waiting for sender...");
                 System.out.println("Connection accepted. Waiting for sender...");
 
-                // Create new socket for file transfer
-                ServerSocket fileSocket = new ServerSocket(RECEIVING_PORT);
-                fileSocket.setSoTimeout(30000); // 30 seconds timeout
+                // Stop broadcasting and receiving new connections
+                isReceiving = false;
+                System.out.println("Stopped broadcasting and receiving new connections");
 
-                // Create progress dialog but don't show it yet
+                // Create and start the file receiver server immediately
+                ServerSocket fileSocket = new ServerSocket(RECEIVING_PORT);
+                System.out.println("File receiver server started on port " + RECEIVING_PORT);
+
+                // Create progress dialog
                 JFrame parentFrame = new JFrame();
                 TransferProgressDialog progressDialog = new TransferProgressDialog(
                     parentFrame, "Receiving Files");
                 progressDialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
 
-                // Keep receiving files until transfer is complete
+                // Start receiving files in background
                 CompletableFuture.runAsync(() -> {
                     try {
-                        while (isReceiving) {
+                        while (true) {
                             System.out.println("Waiting for file transfer connection...");
                             Socket transferSocket = fileSocket.accept();
                             System.out.println("File transfer connection accepted");
 
-                            // Check for completion signal
-                            DataInputStream metadataIn = new DataInputStream(transferSocket.getInputStream());
-                            long fileSize = metadataIn.readLong();
-                            if (fileSize == -1) {
-                                System.out.println("Received completion signal");
+                            try {
+                                DataInputStream checkStream = new DataInputStream(
+                                    new BufferedInputStream(transferSocket.getInputStream()));
+                                
+                                // First try to read the file size
+                                long fileSize = checkStream.readLong();
+                                
+                                if (fileSize == -1) {
+                                    System.out.println("Received completion signal");
+                                    break;
+                                }
+
+                                // Show progress dialog
+                                SwingUtilities.invokeLater(() -> {
+                                    progressDialog.setVisible(true);
+                                    progressDialog.updateProgress(0);
+                                });
+
+                                // Receive the file
+                                receiveFile(transferSocket, saveDirectory, 
+                                    progress -> SwingUtilities.invokeLater(() -> {
+                                        progressDialog.updateProgress(progress);
+                                        System.out.println("Progress: " + progress + "%");
+                                    }),
+                                    status -> SwingUtilities.invokeLater(() -> {
+                                        progressDialog.setStatus(status);
+                                        System.out.println("Status: " + status);
+                                    })
+                                );
+                            } catch (EOFException e) {
+                                System.out.println("Connection closed by sender");
+                                continue;
+                            } catch (Exception e) {
+                                System.err.println("Error processing file: " + e.getMessage());
+                                e.printStackTrace();
                                 break;
+                            } finally {
+                                try {
+                                    transferSocket.close();
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                }
                             }
-
-                            // Show progress dialog for each file
-                            SwingUtilities.invokeLater(() -> {
-                                progressDialog.setVisible(true);
-                                progressDialog.updateProgress(0);
-                            });
-
-                            // Receive the file
-                            receiveFile(transferSocket, saveDirectory, 
-                                progress -> SwingUtilities.invokeLater(() -> {
-                                    progressDialog.updateProgress(progress);
-                                    System.out.println("Progress: " + progress + "%");
-                                }),
-                                status -> SwingUtilities.invokeLater(() -> {
-                                    progressDialog.setStatus(status);
-                                    System.out.println("Status: " + status);
-                                })
-                            );
                         }
-                    } catch (SocketTimeoutException e) {
-                        // Ignore timeout after completion signal
-                        System.out.println("Transfer completed");
-                    } catch (Exception e) {
-                        System.err.println("Error in file transfer: " + e.getMessage());
-                        SwingUtilities.invokeLater(() -> {
-                            progressDialog.setCloseable(true);
-                            progressDialog.dispose();
-                            parentFrame.dispose();
-                            JOptionPane.showMessageDialog(null,
-                                "Error receiving files: " + e.getMessage(),
-                                "Transfer Error",
-                                JOptionPane.ERROR_MESSAGE);
-                        });
-                        e.printStackTrace();
-                    } finally {
-                        try {
-                            fileSocket.close();
-                        } catch (IOException e) {
-                            e.printStackTrace();
-                        }
+
+                        // Show completion message
                         SwingUtilities.invokeLater(() -> {
                             progressDialog.setCloseable(true);
                             progressDialog.dispose();
@@ -178,8 +181,24 @@ public class Receiver {
                                 "Transfer Complete",
                                 JOptionPane.INFORMATION_MESSAGE);
                         });
+
+                    } catch (Exception e) {
+                        System.err.println("Error in file transfer: " + e.getMessage());
+                        e.printStackTrace();
+                        SwingUtilities.invokeLater(() -> {
+                            progressDialog.setCloseable(true);
+                            progressDialog.dispose();
+                            parentFrame.dispose();
+                        });
+                    } finally {
+                        try {
+                            fileSocket.close();
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
                     }
                 });
+
             } else {
                 writer.println("NO");
                 statusCallback.accept("Connection rejected.");
