@@ -10,6 +10,8 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
+import java.util.Arrays;
+import java.io.IOException;
 
 public class FileTransferManager {
     private final Sender sender;
@@ -79,25 +81,25 @@ public class FileTransferManager {
 
                 System.out.println("Starting file transfer to: " + receiver.getUsername());
                 statusCallback.accept("Starting file transfer...");
-                int totalFiles = files.length;
-                int filesSent = 0;
-
-                for (int i = 0; i < totalFiles; i++) {
+                
+                for (int i = 0; i < files.length; i++) {
+                    final int fileIndex = i;  // Create effectively final variable
                     File file = files[i];
+                    if (!file.exists() || !file.canRead()) {
+                        throw new IOException("Cannot read file: " + file.getName());
+                    }
+                    
                     try {
                         statusCallback.accept("Sending file: " + file.getName());
-                        // Pass true if this is the last file in the session.
-                        boolean isLastFile = (i == totalFiles - 1);
-                        int finalFilesSent = filesSent;
+                        boolean isLastFile = (fileIndex == files.length - 1);
                         sender.sendFile(receiver.getIp(), file, progress -> {
-                            int overallProgress = (int) (((finalFilesSent * 100.0) + progress) / totalFiles);
+                            int overallProgress = (int) (((fileIndex * 100.0) + progress) / files.length);
                             progressCallback.accept(overallProgress);
                         }, isLastFile);
-                        filesSent++;
-                        statusCallback.accept(String.format("Completed %d of %d files", filesSent, totalFiles));
+                        
+                        statusCallback.accept(String.format("Completed %d of %d files", fileIndex + 1, files.length));
                     } catch (Exception e) {
-                        System.err.println("Error sending file " + file.getName() + ": " + e.getMessage());
-                        throw e;
+                        throw new IOException("Error sending file " + file.getName() + ": " + e.getMessage(), e);
                     }
                 }
 
@@ -180,18 +182,34 @@ public class FileTransferManager {
         try {
             sender.setListening(false);
             receiver.setReceiving(false);
+            
             if (discoveryFuture != null) {
                 discoveryFuture.cancel(true);
             }
-            transferExecutor.shutdown();
-            scheduledExecutor.shutdown();
-            transferExecutor.awaitTermination(5, TimeUnit.SECONDS);
-            scheduledExecutor.awaitTermination(5, TimeUnit.SECONDS);
+            
+            shutdownExecutors();
+        } catch (Exception e) {
+            System.err.println("Error during shutdown: " + e.getMessage());
+        }
+    }
+
+    private void shutdownExecutors() {
+        List<ExecutorService> executors = Arrays.asList(transferExecutor, scheduledExecutor);
+        
+        // First attempt graceful shutdown
+        executors.forEach(ExecutorService::shutdown);
+        
+        try {
+            // Wait for tasks to complete
+            for (ExecutorService executor : executors) {
+                if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                    executor.shutdownNow();
+                }
+            }
         } catch (InterruptedException e) {
+            // Re-interrupt the thread and force shutdown
             Thread.currentThread().interrupt();
-        } finally {
-            transferExecutor.shutdownNow();
-            scheduledExecutor.shutdownNow();
+            executors.forEach(ExecutorService::shutdownNow);
         }
     }
 

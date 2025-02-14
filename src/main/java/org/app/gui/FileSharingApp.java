@@ -1,8 +1,6 @@
 package org.app.gui;
 
 import org.app.User;
-import org.app.backend.Receiver;
-import org.app.backend.Sender;
 import org.app.backend.FileTransferManager;
 import org.app.gui.theme.AppTheme;
 import javax.swing.*;
@@ -13,9 +11,6 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.function.Consumer;
 import java.util.concurrent.CompletableFuture;
 
 public class FileSharingApp {

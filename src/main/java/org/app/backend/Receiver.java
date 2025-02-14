@@ -6,9 +6,13 @@ import java.io.*;
 import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.StandardOpenOption;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
+import java.util.List;
+import java.util.ArrayList;
 
 public class Receiver {
     private volatile boolean isReceiving = true;
@@ -22,8 +26,10 @@ public class Receiver {
     private static final int CONNECTION_PORT = 9080;
     private static final int BROADCAST_PORT = 9000;
     private static final String BROADCAST_IP = "255.255.255.255";
-    // Use CHUNK_PORT for the persistent chunk connection.
-    private static final int CHUNK_PORT = RECEIVING_PORT + 1;
+    // Each chunk will be received on port: RECEIVING_PORT + 1 + chunkIndex
+    private static final int BASE_CHUNK_PORT = RECEIVING_PORT + 1;
+    // Increase timeouts to 30 seconds to reduce premature timeout errors.
+    private static final int SOCKET_TIMEOUT_MS = 30000;
 
     public void peerBroadcaster(String name) {
         try {
@@ -76,9 +82,10 @@ public class Receiver {
                                           Consumer<Integer> progressCallback,
                                           Consumer<String> statusCallback) {
         try {
-            socket.setSoTimeout(15000);
+            socket.setSoTimeout(SOCKET_TIMEOUT_MS);
             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
+
             String requestMessage = reader.readLine();
             statusCallback.accept("Received connection request");
             System.out.println("Received connection request: " + requestMessage);
@@ -97,18 +104,16 @@ public class Receiver {
                 JFrame parentFrame = new JFrame();
                 TransferProgressDialog progressDialog = new TransferProgressDialog(parentFrame, "Receiving Files");
                 progressDialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
+                progressDialog.setResizable(false);
 
-                // Loop to receive multiple files until a termination signal is received.
+                // Loop to receive multiple files until termination signal is received.
                 try (ServerSocket fileSocket = new ServerSocket(RECEIVING_PORT)) {
-                    fileSocket.setSoTimeout(15000);
+                    fileSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
                     while (true) {
                         try (Socket transferSocket = fileSocket.accept()) {
-                            transferSocket.setSoTimeout(15000);
-                            SwingUtilities.invokeLater(() -> {
-                                progressDialog.setVisible(true);
-                                progressDialog.updateProgress(0);
-                            });
-                            // Process one file transfer.
+                            transferSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
+
+                            // Process one file.
                             boolean terminated = receiveFile(transferSocket, saveDirectory,
                                     progress -> SwingUtilities.invokeLater(() -> {
                                         progressDialog.updateProgress(progress);
@@ -119,6 +124,12 @@ public class Receiver {
                                         System.out.println("Status: " + status);
                                     })
                             );
+
+                            SwingUtilities.invokeLater(() -> {
+                                progressDialog.setVisible(true);
+                                progressDialog.updateProgress(0);
+                            });
+
                             if (terminated) {
                                 System.out.println("Received termination signal");
                                 break;
@@ -157,8 +168,10 @@ public class Receiver {
     public boolean receiveFile(Socket metadataSocket, String saveDirectory,
                                Consumer<Integer> progressCallback,
                                Consumer<String> statusCallback) {
+        ServerSocket[] chunkServers = null;
+        FileChannel fileChannel = null;
         try {
-            metadataSocket.setSoTimeout(15000);
+            metadataSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
 
             // Ensure save directory exists.
             File saveDir = new File(saveDirectory);
@@ -170,6 +183,14 @@ public class Receiver {
             PrintWriter metadataOut = new PrintWriter(new BufferedOutputStream(metadataSocket.getOutputStream()), true);
 
             System.out.println("Reading metadata");
+            
+            // Add check for available bytes before reading
+            if (metadataIn.available() <= 0) {
+                // This is likely a connection test or cleanup connection, not an error
+                System.out.println("No metadata available, skipping connection");
+                return false;
+            }
+
             long fileSize = metadataIn.readLong();
             // Termination signal: fileSize == -1.
             if (fileSize == -1) {
@@ -196,52 +217,46 @@ public class Receiver {
 
             System.out.println("Receiving file: " + fileName + " (Size: " + fileSize + " bytes, Chunks: " + totalChunks + ")");
             File receivedFile = getUniqueFile(new File(saveDirectory, fileName));
-            try (RandomAccessFile raf = new RandomAccessFile(receivedFile, "rw")) {
-                raf.setLength(fileSize);
+            
+            // Open a single FileChannel for the entire transfer
+            fileChannel = FileChannel.open(receivedFile.toPath(), 
+                StandardOpenOption.CREATE, 
+                StandardOpenOption.WRITE,
+                StandardOpenOption.READ);
+            fileChannel.truncate(fileSize);
+
+            // Create chunk servers
+            chunkServers = new ServerSocket[totalChunks];
+            List<CompletableFuture<Integer>> chunkFutures = new ArrayList<>();
+            
+            for (int i = 0; i < totalChunks; i++) {
+                int port = RECEIVING_PORT + 1 + i;
+                ServerSocket ss = new ServerSocket(port);
+                ss.setSoTimeout(SOCKET_TIMEOUT_MS);
+                chunkServers[i] = ss;
+                
+                // Pass FileChannel to receiveChunk
+                chunkFutures.add(receiveChunk(ss, fileChannel, i));
             }
-
-            // Use a persistent chunk server on CHUNK_PORT.
-            try (ServerSocket persistentChunkServer = new ServerSocket(CHUNK_PORT)) {
-                persistentChunkServer.setSoTimeout(15000);
-                // Send READY to indicate that the receiver is set up for chunks.
-                metadataOut.println("READY");
-                metadataOut.flush();
-
-                // Accept one persistent connection for all chunk data.
-                try (Socket chunkSocket = persistentChunkServer.accept();
-                     DataInputStream chunkIn = new DataInputStream(new BufferedInputStream(chunkSocket.getInputStream()))) {
-                    // First, read the total number of chunks.
-                    int receivedTotalChunks = chunkIn.readInt();
-                    if (receivedTotalChunks != totalChunks) {
-                        throw new IOException("Chunk count mismatch. Expected " + totalChunks + " but got " + receivedTotalChunks);
-                    }
-                    // For each chunk, read metadata and then the data.
-                    for (int i = 0; i < totalChunks; i++) {
-                        int chunkIndex = chunkIn.readInt();
-                        long startPosition = chunkIn.readLong();
-                        int chunkSize = chunkIn.readInt();
-                        System.out.println("Receiving chunk " + chunkIndex + " (Size: " + chunkSize + " bytes)");
-                        byte[] buffer = new byte[BUFFER_SIZE];
-                        int totalBytesRead = 0;
-                        try (RandomAccessFile raf = new RandomAccessFile(receivedFile, "rw")) {
-                            raf.seek(startPosition);
-                            while (totalBytesRead < chunkSize) {
-                                int bytesRead = chunkIn.read(buffer, 0, Math.min(buffer.length, chunkSize - totalBytesRead));
-                                if (bytesRead == -1) break;
-                                raf.write(buffer, 0, bytesRead);
-                                totalBytesRead += bytesRead;
-                            }
-                        }
-                        int progress = (int) (((i + 1) * 100.0) / totalChunks);
-                        SwingUtilities.invokeLater(() -> {
-                            progressCallback.accept(progress);
-                            statusCallback.accept("Receiving file: " + fileName + " (" + progress + "%)");
-                        });
-                        System.out.println("Completed receiving chunk " + chunkIndex);
-                    }
+            
+            // Send READY signal
+            metadataOut.println("READY");
+            metadataOut.flush();
+            
+            // Wait for all chunks and track progress
+            int completedChunks = 0;
+            for (CompletableFuture<Integer> future : chunkFutures) {
+                try {
+                    future.get();
+                    completedChunks++;
+                    int progress = (int) ((completedChunks * 100.0) / totalChunks);
+                    progressCallback.accept(progress);
+                    statusCallback.accept("Receiving file: " + fileName + " (" + progress + "%)");
+                } catch (Exception e) {
+                    throw new IOException("Error receiving chunk: " + e.getMessage(), e);
                 }
             }
-
+            
             System.out.println("File received successfully: " + fileName);
             statusCallback.accept("File received successfully: " + fileName);
             try {
@@ -250,6 +265,10 @@ public class Receiver {
             } catch (IOException e) {
                 System.err.println("Error closing metadata streams: " + e.getMessage());
             }
+            return false;
+        } catch (EOFException e) {
+            // This is likely a connection test or cleanup connection, not an error
+            System.out.println("Connection closed by sender (possibly a test connection)");
             return false;
         } catch (Exception e) {
             String errorMsg = "Error receiving file: " + e.getMessage();
@@ -262,7 +281,83 @@ public class Receiver {
                 System.err.println("Error closing socket: " + closeError.getMessage());
             }
             return false;
+        } finally {
+            if (fileChannel != null) {
+                try {
+                    fileChannel.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+            if (chunkServers != null) {
+                for (ServerSocket ss : chunkServers) {
+                    if (ss != null && !ss.isClosed()) {
+                        try {
+                            ss.close();
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    private CompletableFuture<Integer> receiveChunk(ServerSocket ss, FileChannel fileChannel, int expectedChunkIndex) {
+        return CompletableFuture.supplyAsync(() -> {
+            try (Socket chunkSocket = ss.accept();
+                 DataInputStream chunkIn = new DataInputStream(new BufferedInputStream(chunkSocket.getInputStream()))) {
+                
+                // Read chunk metadata
+                int chunkIndex = chunkIn.readInt();
+                long startPosition = chunkIn.readLong();
+                int chunkSize = chunkIn.readInt();
+                int totalChunks = chunkIn.readInt();
+                
+                // Validate metadata
+                if (chunkIndex != expectedChunkIndex || chunkSize <= 0 || startPosition < 0) {
+                    throw new IOException("Invalid chunk metadata: index=" + chunkIndex + 
+                        ", size=" + chunkSize + ", position=" + startPosition);
+                }
+                
+                System.out.println("Receiving chunk " + chunkIndex + " of " + totalChunks + 
+                    " (size=" + chunkSize + ", position=" + startPosition + ")");
+                
+                // Use heap ByteBuffer instead of direct for reading from InputStream
+                ByteBuffer buffer = ByteBuffer.allocate(Math.min(BUFFER_SIZE, chunkSize));
+                int totalBytesRead = 0;
+                
+                synchronized (fileChannel) {
+                    while (totalBytesRead < chunkSize) {
+                        buffer.clear();
+                        int bytesToRead = Math.min(buffer.capacity(), chunkSize - totalBytesRead);
+                        int bytesRead = chunkIn.read(buffer.array(), 0, bytesToRead);
+                        
+                        if (bytesRead == -1) {
+                            break;
+                        }
+                        
+                        buffer.limit(bytesRead);
+                        buffer.position(0);
+                        
+                        // Write buffer to file at correct position
+                        while (buffer.hasRemaining()) {
+                            fileChannel.write(buffer, startPosition + totalBytesRead);
+                        }
+                        totalBytesRead += bytesRead;
+                    }
+                }
+                
+                if (totalBytesRead != chunkSize) {
+                    throw new IOException("Incomplete chunk data: expected=" + chunkSize + 
+                        ", received=" + totalBytesRead);
+                }
+                
+                return chunkIndex;
+            } catch (IOException e) {
+                throw new CompletionException("Error receiving chunk: " + e.getMessage(), e);
+            }
+        });
     }
 
     private boolean isValidFileName(String fileName) {
