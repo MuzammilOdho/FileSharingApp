@@ -3,14 +3,13 @@ package org.app.backend;
 import java.io.File;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
-
-import org.app.User;
-
+import java.net.Socket;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Set;
-import java.net.Socket;
+
+import org.app.User;
 
 public class FileTransferManager {
     private final Sender sender;
@@ -21,7 +20,7 @@ public class FileTransferManager {
     private Consumer<Integer> progressCallback;
     private Consumer<String> statusCallback;
     private volatile CompletableFuture<?> discoveryFuture;
-    
+
     public FileTransferManager() {
         this.sender = new Sender();
         this.receiver = new Receiver();
@@ -29,7 +28,7 @@ public class FileTransferManager {
         this.transferExecutor = Executors.newFixedThreadPool(3); // Allow 3 concurrent transfers
         this.scheduledExecutor = Executors.newSingleThreadScheduledExecutor();
     }
-    
+
     public boolean sendConnectionRequest(User receiver, String senderName, File[] files) {
         try {
             // Stop discovery and wait for it to complete
@@ -38,14 +37,14 @@ public class FileTransferManager {
                 discoveryFuture.get(5, TimeUnit.SECONDS); // Wait up to 5 seconds
             }
             System.out.println("Discovery stopped, sending connection request...");
-            
+
             // Send connection request and wait for confirmation
             boolean accepted = sender.sendConnectionRequest(receiver, senderName, getFileInfo(files));
-            
+
             if (accepted) {
                 // Wait a bit to ensure receiver is ready
                 Thread.sleep(1000);
-                
+
                 // Test connection to receiver
                 try (Socket testSocket = new Socket(receiver.getIp(), 9090)) {
                     System.out.println("Connection test successful");
@@ -61,11 +60,11 @@ public class FileTransferManager {
             return false;
         }
     }
-    
+
     public void startSendingFiles(User receiver, String senderName, File[] files,
-                                Consumer<Integer> progressCallback,
-                                Consumer<String> statusCallback,
-                                Runnable onComplete) {
+                                  Consumer<Integer> progressCallback,
+                                  Consumer<String> statusCallback,
+                                  Runnable onComplete) {
         CompletableFuture.runAsync(() -> {
             try {
                 // Ensure discovery is stopped
@@ -83,14 +82,17 @@ public class FileTransferManager {
                 int totalFiles = files.length;
                 int filesSent = 0;
 
-                for (File file : files) {
+                for (int i = 0; i < totalFiles; i++) {
+                    File file = files[i];
                     try {
                         statusCallback.accept("Sending file: " + file.getName());
+                        // Pass true if this is the last file
+                        boolean isLastFile = (i == totalFiles - 1);
                         int finalFilesSent = filesSent;
                         sender.sendFile(receiver.getIp(), file, progress -> {
-                            int overallProgress = (int) ((finalFilesSent * 100.0 + progress) / totalFiles);
+                            int overallProgress = (int) (((finalFilesSent * 100.0) + progress) / totalFiles);
                             progressCallback.accept(overallProgress);
-                        });
+                        }, isLastFile);
                         filesSent++;
                         statusCallback.accept(String.format("Completed %d of %d files", filesSent, totalFiles));
                     } catch (Exception e) {
@@ -98,7 +100,7 @@ public class FileTransferManager {
                         throw e;
                     }
                 }
-                
+
                 onComplete.run();
             } catch (Exception e) {
                 statusCallback.accept("Error: " + e.getMessage());
@@ -106,7 +108,7 @@ public class FileTransferManager {
             }
         }, transferExecutor);
     }
-    
+
     private String getFileInfo(File[] files) {
         StringBuilder info = new StringBuilder("<html><body>");
         info.append("<h2>Files to be sent:</h2><br>");
@@ -119,61 +121,61 @@ public class FileTransferManager {
         info.append("</body></html>");
         return info.toString();
     }
-    
+
     private String formatFileSize(long size) {
         final String[] units = {"B", "KB", "MB", "GB", "TB"};
         int unitIndex = 0;
         double fileSize = size;
-        
+
         while (fileSize >= 1024 && unitIndex < units.length - 1) {
             fileSize /= 1024;
             unitIndex++;
         }
-        
+
         return String.format("%.2f %s", fileSize, units[unitIndex]);
     }
-    
+
     public void startReceiving(String userName, String saveDirectory,
-                             Consumer<Integer> progressCallback,
-                             Consumer<String> statusCallback) {
+                               Consumer<Integer> progressCallback,
+                               Consumer<String> statusCallback) {
         this.currentSaveDirectory = saveDirectory;
         this.progressCallback = progressCallback;
         this.statusCallback = statusCallback;
-        
+
         receiver.setReceiving(true);
-        
+
         // Start broadcaster in a separate thread
-        CompletableFuture<Void> broadcasterFuture = CompletableFuture.runAsync(() -> 
-            receiver.peerBroadcaster(userName),
-            transferExecutor
+        CompletableFuture<Void> broadcasterFuture = CompletableFuture.runAsync(() ->
+                        receiver.peerBroadcaster(userName),
+                transferExecutor
         );
-        
+
         // Start connection listener in another thread
-        CompletableFuture<Void> listenerFuture = CompletableFuture.runAsync(() -> 
-            receiver.listenForConnectionRequests(
-                this.currentSaveDirectory,
-                this.progressCallback,
-                this.statusCallback
-            ), 
-            transferExecutor
+        CompletableFuture<Void> listenerFuture = CompletableFuture.runAsync(() ->
+                        receiver.listenForConnectionRequests(
+                                this.currentSaveDirectory,
+                                this.progressCallback,
+                                this.statusCallback
+                        ),
+                transferExecutor
         );
 
         // Handle completion
         CompletableFuture.allOf(broadcasterFuture, listenerFuture)
-            .thenRun(() -> {
-                System.out.println("File transfer session completed");
-                statusCallback.accept("Transfer session ended");
-            });
+                .thenRun(() -> {
+                    System.out.println("File transfer session completed");
+                    statusCallback.accept("Transfer session ended");
+                });
     }
-    
+
     private void cleanupInactiveConnections() {
         // Add logic to cleanup any stale connections
     }
-    
+
     public void stopReceiving() {
         receiver.setReceiving(false);
     }
-    
+
     public void shutdown() {
         try {
             sender.setListening(false);
@@ -192,7 +194,7 @@ public class FileTransferManager {
             scheduledExecutor.shutdownNow();
         }
     }
-    
+
     public void startDiscovery(List<User> discoveredReceivers, Consumer<List<User>> publishCallback) {
         // Cancel any existing discovery
         if (discoveryFuture != null) {
@@ -204,7 +206,7 @@ public class FileTransferManager {
             try {
                 Set<String> processedIPs = new HashSet<>();
                 List<User> newUsers = new ArrayList<>();
-                
+
                 sender.peerListener(discoveredReceivers, (user) -> {
                     synchronized (processedIPs) {
                         if (processedIPs.add(user.getIp())) {

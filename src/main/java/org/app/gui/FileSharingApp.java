@@ -338,7 +338,15 @@ public class FileSharingApp {
         fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
         int result = fileChooser.showOpenDialog(frame);
         if (result == JFileChooser.APPROVE_OPTION) {
-            String path = fileChooser.getSelectedFile().getAbsolutePath();
+            File selectedDir = fileChooser.getSelectedFile();
+            if (!selectedDir.exists() && !selectedDir.mkdirs()) {
+                JOptionPane.showMessageDialog(frame,
+                    "Failed to create directory:\n" + selectedDir.getAbsolutePath(),
+                    "Error",
+                    JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+            String path = selectedDir.getAbsolutePath();
             saveDirectoryField = new JTextField(path);
             JOptionPane.showMessageDialog(frame,
                     "Save directory set to:\n" + path,
