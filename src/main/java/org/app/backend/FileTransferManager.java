@@ -1,15 +1,15 @@
 package org.app.backend;
 
+import org.app.User;
+
 import java.io.File;
-import java.util.concurrent.*;
-import java.util.function.Consumer;
 import java.net.Socket;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Set;
-
-import org.app.User;
+import java.util.concurrent.*;
+import java.util.function.Consumer;
 
 public class FileTransferManager {
     private final Sender sender;
@@ -45,7 +45,7 @@ public class FileTransferManager {
                 // Wait a bit to ensure receiver is ready
                 Thread.sleep(1000);
 
-                // Test connection to receiver
+                // Test connection to receiver (metadata connection on port 9090)
                 try (Socket testSocket = new Socket(receiver.getIp(), 9090)) {
                     System.out.println("Connection test successful");
                     return true;
@@ -86,7 +86,7 @@ public class FileTransferManager {
                     File file = files[i];
                     try {
                         statusCallback.accept("Sending file: " + file.getName());
-                        // Pass true if this is the last file
+                        // Pass true if this is the last file in the session.
                         boolean isLastFile = (i == totalFiles - 1);
                         int finalFilesSent = filesSent;
                         sender.sendFile(receiver.getIp(), file, progress -> {
@@ -224,4 +224,4 @@ public class FileTransferManager {
             }
         }, transferExecutor);
     }
-} 
+}

@@ -10,7 +10,6 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.StandardOpenOption;
-import java.util.List;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
 
@@ -24,12 +23,12 @@ public class Sender {
     private static final int LISTENING_PORT = 9000;
     private static final int CONNECTION_PORT = 9080;
     private static final int RECEIVER_PORT = 9090;
-    // We'll use port (RECEIVER_PORT + 1) for persistent chunk transfer.
+    // Use CHUNK_PORT for persistent chunk transfer.
     private static final int CHUNK_PORT = RECEIVER_PORT + 1;
-    // You may experiment with buffer sizes; here we set 8MB as default.
+    // Tune the buffer size for your environment.
     private static final int BUFFER_SIZE = 8 * 1024 * 1024; // 8MB
 
-    public void peerListener(List<User> discoveredReceivers, Consumer<User> onNewUser) {
+    public void peerListener(java.util.List<User> discoveredReceivers, Consumer<User> onNewUser) {
         try (var channel = java.nio.channels.DatagramChannel.open()) {
             channel.bind(new InetSocketAddress(LISTENING_PORT));
             channel.configureBlocking(false);
@@ -72,8 +71,8 @@ public class Sender {
     }
 
     /**
-     * Sends a file. The isLastFile flag indicates whether this is the final file
-     * in the multi-file session. Only for the last file will a termination signal be sent.
+     * Sends a file to the receiver. The isLastFile flag indicates whether this is the last file in the session.
+     * If so, a termination signal (fileSize == -1) is sent afterward.
      */
     public void sendFile(String receiverIP, File file, Consumer<Integer> progressCallback, boolean isLastFile) {
         try {
@@ -88,7 +87,7 @@ public class Sender {
                 int optimalChunkSize = calculateOptimalChunkSize(fileSize);
                 int totalChunks = (int) Math.ceil((double) fileSize / optimalChunkSize);
 
-                // Send metadata: file size, total chunk count, and filename.
+                // Send metadata: file size, totalChunks, and filename.
                 metadataOut.writeLong(fileSize);
                 metadataOut.writeInt(totalChunks);
                 byte[] nameBytes = file.getName().getBytes(StandardCharsets.UTF_8);
@@ -96,20 +95,20 @@ public class Sender {
                 metadataOut.write(nameBytes);
                 metadataOut.flush();
 
-                // Wait for "READY" from receiver.
+                // Wait for "READY" from the receiver.
                 String response = waitForResponse(metadataIn, 30000);
                 if (!"READY".equals(response)) {
                     throw new IOException("Receiver not ready: " + response);
                 }
 
-                // Use persistent connection for all chunk transfers.
+                // Send file chunks using a persistent chunk connection.
                 sendFileChunks(receiverIP, file, totalChunks, optimalChunkSize, progressCallback);
 
-                // Only for the last file, send a termination signal.
+                // Only if this is the last file, send a termination signal.
                 if (isLastFile) {
                     try (Socket completionSocket = new Socket(receiverIP, RECEIVER_PORT)) {
                         DataOutputStream completionOut = new DataOutputStream(completionSocket.getOutputStream());
-                        completionOut.writeLong(-1); // Termination signal.
+                        completionOut.writeLong(-1);
                         System.out.println("Sent termination signal");
                     }
                 }
@@ -123,35 +122,35 @@ public class Sender {
     }
 
     /**
-     * Opens one persistent connection for all chunks.
+     * Opens a persistent SocketChannel on CHUNK_PORT and sends all chunks sequentially.
      */
     private void sendFileChunks(String receiverIP, File file, int totalChunks,
                                 int optimalChunkSize, Consumer<Integer> progressCallback)
             throws Exception {
-        // Open a persistent connection on CHUNK_PORT.
-        try (Socket chunkSocket = new Socket(receiverIP, CHUNK_PORT);
-             DataOutputStream chunkOut = new DataOutputStream(new BufferedOutputStream(chunkSocket.getOutputStream()))) {
-            // First, send the total number of chunks.
+        try (SocketChannel chunkChannel = SocketChannel.open(new InetSocketAddress(receiverIP, CHUNK_PORT));
+             DataOutputStream chunkOut = new DataOutputStream(
+                     new BufferedOutputStream(java.nio.channels.Channels.newOutputStream(chunkChannel)))) {
+            // Send the total number of chunks as a header.
             chunkOut.writeInt(totalChunks);
             chunkOut.flush();
 
-            // For each chunk, send metadata and then file data.
+            // For each chunk, send metadata and then file data using zero-copy.
             for (int i = 0; i < totalChunks; i++) {
                 long startPosition = (long) i * optimalChunkSize;
                 int currentChunkSize = (int) Math.min(optimalChunkSize, file.length() - startPosition);
 
-                // Send chunk metadata.
-                chunkOut.writeInt(i);           // chunk index
-                chunkOut.writeLong(startPosition); // starting position
-                chunkOut.writeInt(currentChunkSize); // chunk size
+                // Send chunk metadata: index, startPosition, and chunk size.
+                chunkOut.writeInt(i);
+                chunkOut.writeLong(startPosition);
+                chunkOut.writeInt(currentChunkSize);
                 chunkOut.flush();
 
-                // Use zero-copy: open a FileChannel and transfer data directly.
+                // Use zero-copy via FileChannel.transferTo.
                 try (FileChannel fileChannel = FileChannel.open(file.toPath(), StandardOpenOption.READ)) {
                     long position = startPosition;
                     long count = currentChunkSize;
                     while (count > 0) {
-                        long transferred = fileChannel.transferTo(position, count, chunkSocket.getChannel());
+                        long transferred = fileChannel.transferTo(position, count, chunkChannel);
                         if (transferred <= 0) break;
                         position += transferred;
                         count -= transferred;
@@ -170,7 +169,7 @@ public class Sender {
             return (int) fileSize;
         }
         int availableProcessors = Runtime.getRuntime().availableProcessors();
-        int optimalChunks = Math.min(availableProcessors * 2, (int) (fileSize / (16 * 1024 * 1024)));
+        int optimalChunks = Math.min(availableProcessors * 2, (int)(fileSize / (16 * 1024 * 1024)));
         if (optimalChunks < 1) optimalChunks = 1;
         return (int) Math.max(16 * 1024 * 1024, fileSize / optimalChunks);
     }

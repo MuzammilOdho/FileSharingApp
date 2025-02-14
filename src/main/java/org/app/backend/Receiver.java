@@ -6,7 +6,6 @@ import java.io.*;
 import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
-import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
@@ -23,7 +22,7 @@ public class Receiver {
     private static final int CONNECTION_PORT = 9080;
     private static final int BROADCAST_PORT = 9000;
     private static final String BROADCAST_IP = "255.255.255.255";
-    // We'll use CHUNK_PORT for persistent chunk connections.
+    // Use CHUNK_PORT for the persistent chunk connection.
     private static final int CHUNK_PORT = RECEIVING_PORT + 1;
 
     public void peerBroadcaster(String name) {
@@ -80,7 +79,6 @@ public class Receiver {
             socket.setSoTimeout(15000);
             BufferedReader reader = new BufferedReader(new InputStreamReader(socket.getInputStream()));
             PrintWriter writer = new PrintWriter(socket.getOutputStream(), true);
-
             String requestMessage = reader.readLine();
             statusCallback.accept("Received connection request");
             System.out.println("Received connection request: " + requestMessage);
@@ -92,7 +90,7 @@ public class Receiver {
                 statusCallback.accept("Connection accepted. Waiting for sender...");
                 System.out.println("Connection accepted. Waiting for sender...");
 
-                // Stop further broadcasts/connections for this session.
+                // Stop further connections for this session.
                 isReceiving = false;
                 System.out.println("File receiver server started on port " + RECEIVING_PORT);
 
@@ -110,8 +108,7 @@ public class Receiver {
                                 progressDialog.setVisible(true);
                                 progressDialog.updateProgress(0);
                             });
-
-                            // Process one file.
+                            // Process one file transfer.
                             boolean terminated = receiveFile(transferSocket, saveDirectory,
                                     progress -> SwingUtilities.invokeLater(() -> {
                                         progressDialog.updateProgress(progress);
@@ -122,8 +119,6 @@ public class Receiver {
                                         System.out.println("Status: " + status);
                                     })
                             );
-
-                            // If the termination signal is received, break the loop.
                             if (terminated) {
                                 System.out.println("Received termination signal");
                                 break;
@@ -133,7 +128,6 @@ public class Receiver {
                             break;
                         }
                     }
-
                     SwingUtilities.invokeLater(() -> {
                         progressDialog.setCloseable(true);
                         progressDialog.dispose();
@@ -157,9 +151,8 @@ public class Receiver {
     }
 
     /**
-     * Receives one file over the metadata socket.
-     * Returns true if a termination signal is received (fileSize == -1),
-     * which indicates no more files will be sent.
+     * Receives one file over the metadata connection.
+     * Returns true if a termination signal (fileSize == -1) is received.
      */
     public boolean receiveFile(Socket metadataSocket, String saveDirectory,
                                Consumer<Integer> progressCallback,
@@ -200,29 +193,29 @@ public class Receiver {
             if (!isValidFileName(fileName)) {
                 throw new IOException("Invalid filename: " + fileName);
             }
+
             System.out.println("Receiving file: " + fileName + " (Size: " + fileSize + " bytes, Chunks: " + totalChunks + ")");
             File receivedFile = getUniqueFile(new File(saveDirectory, fileName));
             try (RandomAccessFile raf = new RandomAccessFile(receivedFile, "rw")) {
                 raf.setLength(fileSize);
             }
 
-            // Use one persistent chunk connection.
-            int persistentChunkPort = CHUNK_PORT;
-            try (ServerSocket persistentChunkServer = new ServerSocket(persistentChunkPort)) {
+            // Use a persistent chunk server on CHUNK_PORT.
+            try (ServerSocket persistentChunkServer = new ServerSocket(CHUNK_PORT)) {
                 persistentChunkServer.setSoTimeout(15000);
-                // Send READY to indicate chunk servers are ready.
+                // Send READY to indicate that the receiver is set up for chunks.
                 metadataOut.println("READY");
                 metadataOut.flush();
 
-                // Accept one persistent connection for all chunks.
+                // Accept one persistent connection for all chunk data.
                 try (Socket chunkSocket = persistentChunkServer.accept();
                      DataInputStream chunkIn = new DataInputStream(new BufferedInputStream(chunkSocket.getInputStream()))) {
-                    // First, read total number of chunks (should match totalChunks).
+                    // First, read the total number of chunks.
                     int receivedTotalChunks = chunkIn.readInt();
                     if (receivedTotalChunks != totalChunks) {
                         throw new IOException("Chunk count mismatch. Expected " + totalChunks + " but got " + receivedTotalChunks);
                     }
-                    // For each chunk, read metadata and then data.
+                    // For each chunk, read metadata and then the data.
                     for (int i = 0; i < totalChunks; i++) {
                         int chunkIndex = chunkIn.readInt();
                         long startPosition = chunkIn.readLong();
