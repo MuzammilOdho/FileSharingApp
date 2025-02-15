@@ -47,7 +47,7 @@ public class Sender {
                             onNewUser.accept(new User(receiverName, receiverIP));
                         }
                     }
-                    Thread.sleep(100);
+                    Thread.sleep(1000);
                 }
                 System.out.println("Peer listener stopped.");
             }

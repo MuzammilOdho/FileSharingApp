@@ -12,6 +12,10 @@ import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.Arrays;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.InetSocketAddress;
 
 public class FileTransferManager {
     private final Sender sender;
@@ -31,36 +35,8 @@ public class FileTransferManager {
         this.scheduledExecutor = Executors.newSingleThreadScheduledExecutor();
     }
 
-    public boolean sendConnectionRequest(User receiver, String senderName, File[] files) {
-        try {
-            // Stop discovery and wait for it to complete
-            sender.setListening(false);
-            if (discoveryFuture != null) {
-                discoveryFuture.get(5, TimeUnit.SECONDS); // Wait up to 5 seconds
-            }
-            System.out.println("Discovery stopped, sending connection request...");
-
-            // Send connection request and wait for confirmation
-            boolean accepted = sender.sendConnectionRequest(receiver, senderName, getFileInfo(files));
-
-            if (accepted) {
-                // Wait a bit to ensure receiver is ready
-                Thread.sleep(1000);
-
-                // Test connection to receiver (metadata connection on port 9090)
-                try (Socket testSocket = new Socket(receiver.getIp(), 9090)) {
-                    System.out.println("Connection test successful");
-                    return true;
-                } catch (Exception e) {
-                    System.err.println("Connection test failed: " + e.getMessage());
-                    return false;
-                }
-            }
-            return false;
-        } catch (Exception e) {
-            System.err.println("Error in connection request: " + e.getMessage());
-            return false;
-        }
+    public boolean sendConnectionRequest(User receiver, String senderName, File[] files) throws IOException {
+       return sender.sendConnectionRequest(receiver,senderName,getFileInfo(files));
     }
 
     public void startSendingFiles(User receiver, String senderName, File[] files,
@@ -113,12 +89,14 @@ public class FileTransferManager {
 
     private String getFileInfo(File[] files) {
         StringBuilder info = new StringBuilder("<html><body>");
-        info.append("<h2>Files to be sent:</h2><br>");
+        info.append("<h3>Files to be received:</h3><br>");
         long totalSize = 0;
+        
         for (File file : files) {
-            info.append(file.getName()).append("<br>");
+            info.append("• ").append(file.getName()).append("<br>");
             totalSize += file.length();
         }
+        
         info.append("<br>Total size: ").append(formatFileSize(totalSize));
         info.append("</body></html>");
         return info.toString();
@@ -137,9 +115,8 @@ public class FileTransferManager {
         return String.format("%.2f %s", fileSize, units[unitIndex]);
     }
 
-    public void startReceiving(String userName, String saveDirectory,
-                               Consumer<Integer> progressCallback,
-                               Consumer<String> statusCallback) {
+    public void startReceiving(String username, String saveDirectory, 
+            Consumer<Integer> progressCallback, Consumer<String> statusCallback) {
         this.currentSaveDirectory = saveDirectory;
         this.progressCallback = progressCallback;
         this.statusCallback = statusCallback;
@@ -148,7 +125,7 @@ public class FileTransferManager {
 
         // Start broadcaster in a separate thread
         CompletableFuture<Void> broadcasterFuture = CompletableFuture.runAsync(() ->
-                        receiver.peerBroadcaster(userName),
+                        receiver.peerBroadcaster(username),
                 transferExecutor
         );
 
@@ -156,8 +133,22 @@ public class FileTransferManager {
         CompletableFuture<Void> listenerFuture = CompletableFuture.runAsync(() ->
                         receiver.listenForConnectionRequests(
                                 this.currentSaveDirectory,
-                                this.progressCallback,
-                                this.statusCallback
+                                (progress) -> {
+                                    progressCallback.accept(progress);
+                                },
+                                (status) -> {
+                                    if (status.startsWith("Connection from")) {
+                                        String senderName = status.split(":")[1].trim();
+                                        statusCallback.accept("Connection request from " + senderName);
+                                    } else if (status.startsWith("Files:")) {
+                                        // Extract total files count
+                                        int totalFiles = Integer.parseInt(status.split(":")[1].trim());
+                                        statusCallback.accept("Total files:" + totalFiles);
+                                        statusCallback.accept(status);
+                                    } else {
+                                        statusCallback.accept(status);
+                                    }
+                                }
                         ),
                 transferExecutor
         );
@@ -241,5 +232,12 @@ public class FileTransferManager {
                 e.printStackTrace();
             }
         }, transferExecutor);
+    }
+
+    public void stopDiscovery() {
+        if (discoveryFuture != null) {
+            discoveryFuture.cancel(true);
+        }
+        sender.setListening(false);
     }
 }

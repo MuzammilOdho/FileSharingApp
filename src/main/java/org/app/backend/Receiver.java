@@ -32,11 +32,11 @@ public class Receiver {
     private static final int SOCKET_TIMEOUT_MS = 30000;
 
     public void peerBroadcaster(String name) {
-        try {
-            System.out.println("Starting peer broadcaster: " + name);
-            DatagramChannel channel = DatagramChannel.open();
+        try (DatagramChannel channel = DatagramChannel.open();) {
             channel.setOption(StandardSocketOptions.SO_BROADCAST, true);
             ByteBuffer buffer = ByteBuffer.wrap(name.getBytes(StandardCharsets.UTF_8));
+            System.out.println("Starting peer broadcaster: " + name);
+
             InetSocketAddress broadcastAddress = new InetSocketAddress(BROADCAST_IP, BROADCAST_PORT);
             while (isReceiving) {
                 System.out.printf("Broadcasting on port %d...\n", BROADCAST_PORT);
@@ -51,7 +51,6 @@ public class Receiver {
                 }
             }
             System.out.println("Peer broadcaster stopped");
-            channel.close();
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -59,21 +58,27 @@ public class Receiver {
 
     public void listenForConnectionRequests(String saveDirectory, Consumer<Integer> progressCallback, Consumer<String> statusCallback) {
         try (ServerSocket serverSocket = new ServerSocket(CONNECTION_PORT)) {
+            serverSocket.setSoTimeout(1000);  // Set timeout for accept()
             statusCallback.accept("Listening for connection requests on port " + CONNECTION_PORT);
-            System.out.println("Listening for connection requests on port " + CONNECTION_PORT);
+            
             while (isReceiving) {
                 try {
                     Socket socket = serverSocket.accept();
                     handleIncomingConnection(socket, saveDirectory, progressCallback, statusCallback);
+                } catch (SocketTimeoutException e) {
+                    // Check if we should continue listening
+                    if (!isReceiving) {
+                        break;
+                    }
                 } catch (IOException e) {
                     if (isReceiving) {
                         statusCallback.accept("Connection error: " + e.getMessage());
                     }
                 }
             }
-            System.out.println("Closing Listening for connection requests on port " + CONNECTION_PORT);
+            
+            System.out.println("Stopped listening for connection requests");
         } catch (IOException e) {
-            e.printStackTrace();
             statusCallback.accept("Error: " + e.getMessage());
         }
     }
