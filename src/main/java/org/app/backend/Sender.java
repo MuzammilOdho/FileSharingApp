@@ -4,17 +4,23 @@ import org.app.User;
 
 import java.io.*;
 import java.net.InetSocketAddress;
+import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.StandardOpenOption;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
-import java.util.List;
-import java.util.ArrayList;
 import java.util.concurrent.Future;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.TimeoutException;
 
 public class Sender {
     private volatile boolean isListening = true;
@@ -30,6 +36,11 @@ public class Sender {
     // Buffer size remains 8MB (adjust as needed)
     private static final int BUFFER_SIZE = 8 * 1024 * 1024;
     private static final int CHUNK_SIZE = 64 * 1024 * 1024; // 64MB chunks
+    private static final int MAX_PORT_ATTEMPTS = 100; // Maximum number of port attempts
+    private static final int PORT_RANGE_START = 50000; // Start of dynamic port range
+    private static final int PORT_RANGE_END = 60000;   // End of dynamic port range
+    private static final int SOCKET_TIMEOUT_MS = 30000; // 30 seconds timeout
+    private final ConcurrentHashMap<Integer, Integer> chunkPortMap = new ConcurrentHashMap<>();
 
     public void peerListener(java.util.List<User> discoveredReceivers, Consumer<User> onNewUser) {
         try {
@@ -133,36 +144,105 @@ public class Sender {
     }
 
     /**
-     * Sends file chunks in parallel using an ExecutorService.
-     * Each chunk is sent over its own SocketChannel.
+     * Finds an available port for chunk transfer
+     */
+    private int findAvailablePort(int chunkIndex) {
+        // First try the default port
+        int defaultPort = RECEIVER_PORT + 1 + chunkIndex;
+        if (isPortAvailable(defaultPort)) {
+            return defaultPort;
+        }
+
+        // If default port is not available, try random ports in the range
+        Random random = new Random();
+        Set<Integer> triedPorts = new HashSet<>();
+        
+        while (triedPorts.size() < MAX_PORT_ATTEMPTS) {
+            int port = PORT_RANGE_START + random.nextInt(PORT_RANGE_END - PORT_RANGE_START);
+            
+            if (!triedPorts.contains(port)) {
+                triedPorts.add(port);
+                if (isPortAvailable(port)) {
+                    return port;
+                }
+            }
+        }
+        
+        throw new RuntimeException("No available ports found after " + MAX_PORT_ATTEMPTS + " attempts");
+    }
+
+    /**
+     * Checks if a port is available
+     */
+    private boolean isPortAvailable(int port) {
+        try (ServerSocket socket = new ServerSocket(port)) {
+            socket.setReuseAddress(true);
+            return true;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Modified sendFileChunks method to handle dynamic ports
      */
     private void sendFileChunks(String receiverIP, File file, int totalChunks, 
                               int optimalChunkSize, Consumer<Integer> progressCallback,
                               Consumer<String> statusCallback) throws Exception {
-        // Limit concurrent transfers to avoid overwhelming network
         int maxConcurrentChunks = Math.min(4, Runtime.getRuntime().availableProcessors());
         ExecutorService chunkExecutor = Executors.newFixedThreadPool(maxConcurrentChunks);
         CompletionService<Integer> completionService = new ExecutorCompletionService<>(chunkExecutor);
         
         try {
-            // Submit all chunk tasks first
+            // Allocate initial ports
+            for (int i = 0; i < totalChunks; i++) {
+                int port = findAvailablePort(i);
+                chunkPortMap.put(i, port);
+                statusCallback.accept(String.format("Allocated port %d for chunk %d", port, i + 1));
+            }
+
+            // Send port mapping and handle negotiation
+            statusCallback.accept("Negotiating ports with receiver");
+            try (Socket mappingSocket = new Socket(receiverIP, RECEIVER_PORT)) {
+                mappingSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
+                
+                // Send initial port map
+                ObjectOutputStream oos = new ObjectOutputStream(mappingSocket.getOutputStream());
+                oos.writeObject(new HashMap<>(chunkPortMap));
+                oos.flush();
+                
+                // Get potentially modified port map from receiver
+                ObjectInputStream ois = new ObjectInputStream(mappingSocket.getInputStream());
+                Map<Integer, Integer> adjustedPorts = (Map<Integer, Integer>) ois.readObject();
+                
+                // Update our port map with receiver's adjustments
+                chunkPortMap.clear();
+                chunkPortMap.putAll(adjustedPorts);
+                
+                // Acknowledge the adjusted port map
+                oos.writeObject("PORT_MAP_ACCEPTED");
+                oos.flush();
+            }
+
+            // Submit all chunk tasks
             List<Future<Integer>> futures = new ArrayList<>();
             for (int i = 0; i < totalChunks; i++) {
                 final int chunkIndex = i;
                 final long startPosition = (long) i * optimalChunkSize;
-                final int currentChunkSize = (int) Math.min(optimalChunkSize, 
-                    file.length() - startPosition);
+                final int currentChunkSize = (int) Math.min(optimalChunkSize, file.length() - startPosition);
                 
-                statusCallback.accept(String.format("Queuing chunk %d/%d", 
-                    chunkIndex + 1, totalChunks));
+                statusCallback.accept(String.format("Queuing chunk %d/%d on port %d", 
+                    chunkIndex + 1, totalChunks, chunkPortMap.get(chunkIndex)));
                 
                 Future<Integer> future = completionService.submit(() -> sendSingleChunk(
                     receiverIP, file, chunkIndex, 
-                    startPosition, currentChunkSize, totalChunks, statusCallback));
+                    startPosition, currentChunkSize, totalChunks, 
+                    chunkPortMap.get(chunkIndex), // Pass the allocated port
+                    statusCallback));
                 futures.add(future);
             }
 
-            // Track completed chunks for progress updates
+            // Process completions
             int completedChunks = 0;
             while (completedChunks < totalChunks) {
                 try {
@@ -188,13 +268,18 @@ public class Sender {
                 }
             }
         } finally {
+            chunkPortMap.clear();
             shutdownExecutor(chunkExecutor);
         }
     }
 
+    /**
+     * Modified sendSingleChunk method to use the allocated port
+     */
     private Integer sendSingleChunk(String receiverIP, File file, int chunkIndex, 
                                   long startPosition, int chunkSize, int totalChunks,
-                                  Consumer<String> statusCallback) throws IOException, InterruptedException {
+                                  int allocatedPort, Consumer<String> statusCallback) 
+                                  throws IOException, InterruptedException {
         int retryCount = 0;
         int maxRetries = 3;
         int baseDelay = 2000; // Increased base delay to 2 seconds
@@ -222,7 +307,7 @@ public class Sender {
                 
                 // Connect with timeout
                 chunkChannel.configureBlocking(true);
-                if (!chunkChannel.connect(new InetSocketAddress(receiverIP, RECEIVER_PORT + 1 + chunkIndex))) {
+                if (!chunkChannel.connect(new InetSocketAddress(receiverIP, allocatedPort))) {
                     throw new IOException("Connection timeout");
                 }
                 

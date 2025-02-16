@@ -3,7 +3,6 @@
     import org.app.User;
 
     import java.io.File;
-    import java.net.Socket;
     import java.util.List;
     import java.util.ArrayList;
     import java.util.HashSet;
@@ -12,10 +11,7 @@
     import java.util.function.Consumer;
     import java.util.Arrays;
     import java.io.IOException;
-    import java.io.PrintWriter;
-    import java.io.BufferedReader;
-    import java.io.InputStreamReader;
-    import java.net.InetSocketAddress;
+
 
     public class FileTransferManager {
         private final Sender sender;

@@ -7,6 +7,7 @@ import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
 import java.nio.channels.FileChannel;
+import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.*;
@@ -14,6 +15,11 @@ import java.util.function.Consumer;
 import java.util.List;
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.Set;
+import java.util.HashSet;
+import java.util.Random;
 
 public class Receiver {
     private volatile boolean isReceiving = true;
@@ -22,6 +28,7 @@ public class Receiver {
     private ServerSocket[] chunkServers;
     private Socket currentSocket;
     private ServerSocket currentServerSocket;
+    private Map<Integer, Integer> chunkPortMap = new HashMap<>();
 
     public void setReceiving(boolean receiving) {
         isReceiving = receiving;
@@ -41,6 +48,10 @@ public class Receiver {
     private static final int BASE_CHUNK_PORT = RECEIVING_PORT + 1;
     // Increase timeouts to 30 seconds to reduce premature timeout errors.
     private static final int SOCKET_TIMEOUT_MS = 30000;
+    private static final int PORT_RANGE_START = 50000;
+    private static final int PORT_RANGE_END = 60000;
+    private static final int MAX_PORT_ATTEMPTS = 100;
+    private static final Random random = new Random();
 
     public void peerBroadcaster(String name) {
         try (DatagramChannel channel = DatagramChannel.open();) {
@@ -201,6 +212,7 @@ public class Receiver {
                                Consumer<String> statusCallback) {
         this.chunkServers = null;
         FileChannel fileChannel = null;
+        Set<Integer> allocatedPorts = new HashSet<>();
         
         try {
             metadataSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
@@ -227,6 +239,24 @@ public class Receiver {
             log(String.format("Receiving file: %s (Size: %s, Chunks: %d)", 
                 fileName, formatFileSize(fileSize), totalChunks));
 
+            // Read port mapping with validation
+            ObjectInputStream ois = new ObjectInputStream(metadataSocket.getInputStream());
+            Map<Integer, Integer> receivedPortMap = (Map<Integer, Integer>) ois.readObject();
+            
+            // Validate and adjust ports if needed
+            chunkPortMap = validateAndAdjustPorts(receivedPortMap, totalChunks);
+            
+            // Send back the potentially modified port map
+            ObjectOutputStream oos = new ObjectOutputStream(metadataSocket.getOutputStream());
+            oos.writeObject(chunkPortMap);
+            oos.flush();
+            
+            // Wait for sender acknowledgment
+            String response = (String) ois.readObject();
+            if (!"PORT_MAP_ACCEPTED".equals(response)) {
+                throw new IOException("Sender did not accept port mapping");
+            }
+
             // Create file and prepare chunk servers before sending READY
             File receivedFile = getUniqueFile(new File(saveDirectory, fileName));
             log("Saving to: " + receivedFile.getAbsolutePath());
@@ -237,17 +267,20 @@ public class Receiver {
                 StandardOpenOption.READ);
             fileChannel.truncate(fileSize);
 
-            // Create chunk servers
+            // Create chunk servers with validated ports
             chunkServers = new ServerSocket[totalChunks];
             for (int i = 0; i < totalChunks; i++) {
-                if (!isReceiving) {
-                    throw new IOException("Transfer cancelled by user");
+                int port = chunkPortMap.get(i);
+                try {
+                    ServerSocket ss = createServerSocket(port);
+                    chunkServers[i] = ss;
+                    allocatedPorts.add(port);
+                    log("Created chunk server " + i + " on port " + port);
+                } catch (IOException e) {
+                    // Clean up any successfully created servers
+                    cleanupServers(chunkServers, allocatedPorts);
+                    throw new IOException("Failed to create server on port " + port + ": " + e.getMessage());
                 }
-                int port = RECEIVING_PORT + 1 + i;
-                ServerSocket ss = new ServerSocket(port);
-                ss.setSoTimeout(SOCKET_TIMEOUT_MS);
-                chunkServers[i] = ss;
-                log("Created chunk server " + i + " on port " + port);
             }
             
             // Send READY signal with proper flush
@@ -282,6 +315,7 @@ public class Receiver {
             log("File received successfully: " + fileName);
             return false;
         } catch (Exception e) {
+            cleanupServers(chunkServers, allocatedPorts);
             String errorMsg = "Error receiving file: " + e.getMessage();
             log(errorMsg);
             if (e.getMessage().contains("Transfer cancelled")) {
@@ -292,6 +326,7 @@ public class Receiver {
             throw new RuntimeException(e);
         } finally {
             closeResources(fileChannel);
+            chunkPortMap.clear();
         }
     }
 
@@ -492,6 +527,81 @@ public class Receiver {
                     }
                 }
             }
+        }
+    }
+
+    private Map<Integer, Integer> validateAndAdjustPorts(Map<Integer, Integer> receivedPorts, int totalChunks) 
+            throws IOException {
+        Map<Integer, Integer> adjustedPorts = new HashMap<>();
+        Set<Integer> usedPorts = new HashSet<>();
+        
+        for (int i = 0; i < totalChunks; i++) {
+            Integer originalPort = receivedPorts.get(i);
+            if (originalPort == null) {
+                throw new IOException("Missing port mapping for chunk " + i);
+            }
+            
+            int port = originalPort;
+            // If port is already used or in invalid range, find a new one
+            if (usedPorts.contains(port) || !isPortAvailable(port)) {
+                port = findAvailablePort(usedPorts);
+            }
+            
+            adjustedPorts.put(i, port);
+            usedPorts.add(port);
+        }
+        
+        return adjustedPorts;
+    }
+
+    private int findAvailablePort(Set<Integer> excludedPorts) throws IOException {
+        Set<Integer> triedPorts = new HashSet<>();
+        
+        while (triedPorts.size() < MAX_PORT_ATTEMPTS) {
+            int port = PORT_RANGE_START + random.nextInt(PORT_RANGE_END - PORT_RANGE_START);
+            
+            if (!excludedPorts.contains(port) && !triedPorts.contains(port)) {
+                triedPorts.add(port);
+                if (isPortAvailable(port)) {
+                    return port;
+                }
+            }
+        }
+        
+        throw new IOException("No available ports found after " + MAX_PORT_ATTEMPTS + " attempts");
+    }
+
+    private ServerSocket createServerSocket(int port) throws IOException {
+        ServerSocket ss = new ServerSocket();
+        ss.setReuseAddress(true);
+        ss.bind(new InetSocketAddress(port));
+        ss.setSoTimeout(SOCKET_TIMEOUT_MS);
+        return ss;
+    }
+
+    private void cleanupServers(ServerSocket[] servers, Set<Integer> allocatedPorts) {
+        if (servers != null) {
+            for (ServerSocket ss : servers) {
+                if (ss != null && !ss.isClosed()) {
+                    try {
+                        ss.close();
+                    } catch (IOException e) {
+                        // Log but don't throw
+                        System.err.println("Error closing server socket: " + e.getMessage());
+                    }
+                }
+            }
+        }
+        allocatedPorts.clear();
+    }
+
+    private boolean isPortAvailable(int port) {
+        try (ServerSocket socket = new ServerSocket()) {
+            socket.setReuseAddress(true);
+            socket.bind(new InetSocketAddress(port));
+            return true;
+        } catch (IOException e) {
+            return false;
         }
     }
 }
