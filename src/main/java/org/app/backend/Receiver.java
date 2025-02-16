@@ -106,11 +106,6 @@ public class Receiver {
                 isReceiving = false;
                 System.out.println("File receiver server started on port " + RECEIVING_PORT);
 
-                JFrame parentFrame = new JFrame();
-                TransferProgressDialog progressDialog = new TransferProgressDialog(parentFrame, "Receiving Files");
-                progressDialog.setDefaultCloseOperation(JDialog.DO_NOTHING_ON_CLOSE);
-                progressDialog.setResizable(false);
-
                 // Loop to receive multiple files until termination signal is received.
                 try (ServerSocket fileSocket = new ServerSocket(RECEIVING_PORT)) {
                     fileSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
@@ -120,20 +115,15 @@ public class Receiver {
 
                             // Process one file.
                             boolean terminated = receiveFile(transferSocket, saveDirectory,
-                                    progress -> SwingUtilities.invokeLater(() -> {
-                                        progressDialog.updateProgress(progress);
+                                    progress -> {
+                                        progressCallback.accept(progress);
                                         System.out.println("Progress: " + progress + "%");
-                                    }),
-                                    status -> SwingUtilities.invokeLater(() -> {
-                                        progressDialog.setStatus(status);
+                                    },
+                                    status -> {
+                                        statusCallback.accept(status);
                                         System.out.println("Status: " + status);
-                                    })
+                                    }
                             );
-
-                            SwingUtilities.invokeLater(() -> {
-                                progressDialog.setVisible(true);
-                                progressDialog.updateProgress(0);
-                            });
 
                             if (terminated) {
                                 System.out.println("Received termination signal");
@@ -144,15 +134,10 @@ public class Receiver {
                             break;
                         }
                     }
-                    SwingUtilities.invokeLater(() -> {
-                        progressDialog.setCloseable(true);
-                        progressDialog.dispose();
-                        parentFrame.dispose();
-                        JOptionPane.showMessageDialog(null,
-                                "All files received successfully!",
-                                "Transfer Complete",
-                                JOptionPane.INFORMATION_MESSAGE);
-                    });
+                    JOptionPane.showMessageDialog(null,
+                            "All files received successfully!",
+                            "Transfer Complete",
+                            JOptionPane.INFORMATION_MESSAGE);
                 } catch (Exception e) {
                     System.err.println("Error in file receiver server: " + e.getMessage());
                 }

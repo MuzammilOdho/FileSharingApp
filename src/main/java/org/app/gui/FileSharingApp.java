@@ -449,74 +449,14 @@ public class FileSharingApp {
         }
 
         user.setUsername(nameField.getText());
-        
-        JDialog waitDialog = new JDialog(frame, "Waiting for Connection", true);
-        waitDialog.setSize(scale(400), scale(200));
-        waitDialog.setLocationRelativeTo(frame);
-        
-        JPanel mainPanel = new JPanel(new MigLayout("insets 20, fill", "[grow]", "[]15[]15[]"));
-        mainPanel.setBackground(ModernTheme.BORDER_COLOR.brighter());
-        
-        // Status panel with connection info
-        JPanel statusPanel = new JPanel(new MigLayout("", "[]10[]", "[]"));
-        statusPanel.setOpaque(false);
-        
-        JLabel iconLabel = new JLabel("●");
-        iconLabel.setFont(new Font("Arial", Font.BOLD, 24));
-        iconLabel.setForeground(ModernTheme.ACCENT_COLOR);
-        
-        JLabel waitLabel = new JLabel("<html><b>Waiting for connections</b><br/>Name: " + 
-            user.getUsername() + "</html>");
-        waitLabel.setFont(AppTheme.REGULAR_FONT.deriveFont(14f));
-        waitLabel.setForeground(Color.WHITE);
-        
-        statusPanel.add(iconLabel);
-        statusPanel.add(waitLabel);
-        
-        // Progress panel
-        JPanel progressPanel = new JPanel(new MigLayout("fill", "[grow]"));
-        progressPanel.setOpaque(false);
-        
-        JProgressBar waitProgress = new JProgressBar();
-        waitProgress.setIndeterminate(true);
-        waitProgress.setPreferredSize(new Dimension(scale(300), scale(8)));
-        
-        progressPanel.add(waitProgress, "grow");
-        
-        // Button panel
-        JPanel buttonPanel = new JPanel(new MigLayout("", "push[]push", "[]"));
-        buttonPanel.setOpaque(false);
-        
-        JButton cancelButton = ModernTheme.createAccentButton("Cancel");
-        cancelButton.setPreferredSize(new Dimension(scale(100), scale(30)));
-        
-        buttonPanel.add(cancelButton);
-        
-        // Add all panels
-        mainPanel.add(statusPanel, "grow, wrap");
-        mainPanel.add(progressPanel, "grow, wrap");
-        mainPanel.add(buttonPanel, "grow");
-        
-        waitDialog.add(mainPanel);
-        
-        // Create a reference to the dialog that can be closed from the callback
-        final JDialog finalWaitDialog = waitDialog;
-        final Timer pulseTimer = new Timer(1000, e -> iconLabel.setVisible(!iconLabel.isVisible()));
-        pulseTimer.start();
-        
+
         // Initialize the main progress panel
-        if (transfersPanel.getComponentCount() > 0) {
-            transfersPanel.removeAll();
-        }
-        TransferProgressPanel mainProgressPanel = new TransferProgressPanel("Waiting for files...", "main");
+        TransferProgressPanel mainProgressPanel = new TransferProgressPanel("Waiting for incoming files...", "main");
+        transfersPanel.removeAll();
         transfersPanel.add(mainProgressPanel);
-        transfersPanel.setVisible(false);
-        
-        cancelButton.addActionListener(e -> {
-            pulseTimer.stop();
-            transferManager.stopReceiving();
-            finalWaitDialog.dispose();
-        });
+        transfersPanel.setVisible(true);
+        frame.revalidate();
+        frame.repaint();
 
         transferManager.startReceiving(user.getUsername(),
             saveDirectoryField.getText(),
@@ -534,19 +474,14 @@ public class FileSharingApp {
                 SwingUtilities.invokeLater(() -> {
                     if (status.contains("Connection request from")) {
                         String senderName = status.substring(status.indexOf("from") + 5);
-                        int option = JOptionPane.showConfirmDialog(finalWaitDialog,
+                        int option = JOptionPane.showConfirmDialog(frame,
                             "Accept file transfer from " + senderName + "?",
                             "Connection Request",
                             JOptionPane.YES_NO_OPTION);
                         
                         if (option == JOptionPane.YES_OPTION) {
-                            pulseTimer.stop();
-                            finalWaitDialog.dispose();
-                            transfersPanel.setVisible(true);
                             mainProgressPanel.updateStatus("Receiving files from " + senderName);
                             mainProgressPanel.updateCounter(0, 0);
-                            frame.revalidate();
-                            frame.repaint();
                         }
                     } else if (status.startsWith("Receiving file:")) {
                         String fileName = status.substring(status.indexOf(":") + 1).trim();
@@ -563,23 +498,10 @@ public class FileSharingApp {
                         String[] parts = status.split(":");
                         int totalFiles = Integer.parseInt(parts[1].trim());
                         mainProgressPanel.updateCounter(0, totalFiles);
-                    } else {
-                        waitLabel.setText("<html><b>Waiting for connections</b><br/>" + status + "</html>");
                     }
                 });
             }
         );
-
-        waitDialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
-        waitDialog.addWindowListener(new WindowAdapter() {
-            @Override
-            public void windowClosing(WindowEvent e) {
-                pulseTimer.stop();
-                transferManager.stopReceiving();
-            }
-        });
-        
-        waitDialog.setVisible(true);
     }
 
     private void setSaveDirectory() {
