@@ -24,9 +24,10 @@ public class Receiver {
 
     public void setReceiving(boolean receiving) {
         isReceiving = receiving;
-        if (!receiving) {
-            isAcceptingConnections = false;
-        }
+    }
+
+    public void setAcceptingConnections(boolean acceptingConnections) {
+        isAcceptingConnections = acceptingConnections;
     }
 
     private static final int RECEIVING_PORT = 9090;
@@ -66,22 +67,35 @@ public class Receiver {
 
     public void listenForConnectionRequests(String saveDirectory, Consumer<Integer> progressCallback, Consumer<String> statusCallback) {
         this.statusCallback = statusCallback;
-        try (ServerSocket serverSocket = new ServerSocket(CONNECTION_PORT)) {
+        ServerSocket serverSocket = null;
+        try {
+            serverSocket = new ServerSocket(CONNECTION_PORT);
             this.currentServerSocket = serverSocket;
-            serverSocket.setSoTimeout(1000);
+            serverSocket.setSoTimeout(1000); // 1 second timeout for checking flags
             log("Listening for connection requests on port " + CONNECTION_PORT);
             
-            while (isAcceptingConnections) {
+            while (isAcceptingConnections && isReceiving) {  // Check both flags
                 try {
                     Socket socket = serverSocket.accept();
+                    if (!isAcceptingConnections || !isReceiving) {
+                        // Double-check flags after accept succeeds
+                        try {
+                            socket.close();
+                        } catch (IOException e) {
+                            // Ignore close errors
+                        }
+                        break;
+                    }
+                    
                     this.currentSocket = socket;
                     handleIncomingConnection(socket, saveDirectory, progressCallback, statusCallback);
                 } catch (SocketTimeoutException e) {
-                    if (!isAcceptingConnections) {
+                    // Normal timeout, check flags and continue
+                    if (!isAcceptingConnections || !isReceiving) {
                         break;
                     }
                 } catch (IOException e) {
-                    if (isAcceptingConnections) {
+                    if (isAcceptingConnections && isReceiving) {
                         log("Connection error: " + e.getMessage());
                     }
                 }
@@ -89,7 +103,18 @@ public class Receiver {
             
             log("Stopped listening for connection requests");
         } catch (IOException e) {
-            log("Error: " + e.getMessage());
+            log("Error starting connection listener: " + e.getMessage());
+        } finally {
+            // Ensure proper cleanup
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                try {
+                    serverSocket.close();
+                    log("Closed connection listener socket");
+                } catch (IOException e) {
+                    log("Error closing connection listener: " + e.getMessage());
+                }
+            }
+            this.currentServerSocket = null;
         }
     }
 
@@ -371,38 +396,51 @@ public class Receiver {
 
     // Add this method to handle cleanup when stopping
     public void stopReceiving() {
+        // Set both flags first to prevent new connections
         isReceiving = false;
         isAcceptingConnections = false;
         log("Stopping receiver...");
-        try {
-            // Close all resources in reverse order
-            if (chunkServers != null) {
-                for (int i = 0; i < chunkServers.length; i++) {
-                    ServerSocket server = chunkServers[i];
-                    if (server != null && !server.isClosed()) {
-                        server.close();
-                        log("Closed chunk server " + i);
-                    }
+        
+        // Create a list of resources to close
+        List<AutoCloseable> resourcesToClose = new ArrayList<>();
+        
+        // Add all resources that need to be closed
+        if (chunkServers != null) {
+            for (ServerSocket server : chunkServers) {
+                if (server != null && !server.isClosed()) {
+                    resourcesToClose.add(server);
                 }
-                chunkServers = null;
             }
-            
-            if (currentSocket != null && !currentSocket.isClosed()) {
-                currentSocket.close();
-                log("Closed current connection socket");
-                currentSocket = null;
-            }
-            
-            if (currentServerSocket != null && !currentServerSocket.isClosed()) {
-                currentServerSocket.close();
-                log("Closed main server socket");
-                currentServerSocket = null;
-            }
-            
-            log("Receiver stopped successfully");
-        } catch (IOException e) {
-            log("Error while stopping receiver: " + e.getMessage());
         }
+        
+        if (currentSocket != null && !currentSocket.isClosed()) {
+            resourcesToClose.add(currentSocket);
+        }
+        
+        if (currentServerSocket != null && !currentServerSocket.isClosed()) {
+            resourcesToClose.add(currentServerSocket);
+        }
+        
+        // Close all resources
+        for (AutoCloseable resource : resourcesToClose) {
+            try {
+                resource.close();
+                if (resource instanceof ServerSocket) {
+                    log("Closed server socket on port " + ((ServerSocket) resource).getLocalPort());
+                } else {
+                    log("Closed socket connection");
+                }
+            } catch (Exception e) {
+                log("Error closing resource: " + e.getMessage());
+            }
+        }
+        
+        // Clear references
+        chunkServers = null;
+        currentSocket = null;
+        currentServerSocket = null;
+        
+        log("Receiver stopped successfully");
     }
 
     private void closeResources(FileChannel fileChannel) {

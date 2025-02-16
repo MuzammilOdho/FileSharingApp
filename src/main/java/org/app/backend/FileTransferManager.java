@@ -122,6 +122,8 @@
             this.statusCallback = statusCallback;
 
             receiver.setReceiving(true);
+            receiver.setAcceptingConnections(true);
+
 
             // Start broadcaster in a separate thread
             CompletableFuture<Void> broadcasterFuture = CompletableFuture.runAsync(() ->
