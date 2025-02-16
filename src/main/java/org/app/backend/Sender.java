@@ -107,7 +107,7 @@ public class Sender {
                 metadataOut.write(nameBytes);
                 metadataOut.flush();
 
-                statusCallback.accept("Waiting for receiver ready signal...");
+                // Wait for READY signal with proper error handling
                 String response = waitForResponse(metadataIn, 30000);
                 if (!"READY".equals(response)) {
                     throw new IOException("Receiver not ready: " + response);
@@ -303,14 +303,21 @@ public class Sender {
     private String waitForResponse(BufferedReader reader, int timeoutMs) throws IOException {
         long startTime = System.currentTimeMillis();
         StringBuilder response = new StringBuilder();
+        
         while (System.currentTimeMillis() - startTime < timeoutMs) {
-            if (reader.ready()) {
+            if (reader.ready() || reader.markSupported()) {
                 int c;
                 while ((c = reader.read()) != -1) {
-                    if (c == '\n') break;
-                    response.append((char) c);
+                    if (c == '\n' || c == '\r') {
+                        String result = response.toString().trim();
+                        if (!result.isEmpty()) {
+                            return result;
+                        }
+                        response.setLength(0);
+                    } else {
+                        response.append((char) c);
+                    }
                 }
-                return response.toString().trim();
             }
             try {
                 Thread.sleep(100);

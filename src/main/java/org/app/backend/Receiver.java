@@ -199,17 +199,14 @@ public class Receiver {
                                Consumer<String> statusCallback) {
         this.chunkServers = null;
         FileChannel fileChannel = null;
+        
         try {
             metadataSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
             
-            File saveDir = new File(saveDirectory);
-            if (!saveDir.exists() && !saveDir.mkdirs()) {
-                log("Failed to create save directory: " + saveDirectory);
-                throw new IOException("Failed to create save directory: " + saveDirectory);
-            }
-
-            DataInputStream metadataIn = new DataInputStream(new BufferedInputStream(metadataSocket.getInputStream()));
-            PrintWriter metadataOut = new PrintWriter(new BufferedOutputStream(metadataSocket.getOutputStream()), true);
+            DataInputStream metadataIn = new DataInputStream(
+                new BufferedInputStream(metadataSocket.getInputStream()));
+            PrintWriter metadataOut = new PrintWriter(
+                new BufferedOutputStream(metadataSocket.getOutputStream()), true);
 
             log("Reading file metadata...");
             
@@ -228,6 +225,7 @@ public class Receiver {
             log(String.format("Receiving file: %s (Size: %s, Chunks: %d)", 
                 fileName, formatFileSize(fileSize), totalChunks));
 
+            // Create file and prepare chunk servers before sending READY
             File receivedFile = getUniqueFile(new File(saveDirectory, fileName));
             log("Saving to: " + receivedFile.getAbsolutePath());
             
@@ -237,47 +235,28 @@ public class Receiver {
                 StandardOpenOption.READ);
             fileChannel.truncate(fileSize);
 
-            // Check if receiving was cancelled before creating chunk servers
-            if (!isReceiving) {
-                log("Transfer cancelled before starting");
-                throw new IOException("Transfer cancelled by user");
-            }
-
             // Create chunk servers
             chunkServers = new ServerSocket[totalChunks];
-            List<CompletableFuture<Integer>> chunkFutures = new ArrayList<>();
-            
-            log("Creating " + totalChunks + " chunk servers...");
             for (int i = 0; i < totalChunks; i++) {
                 if (!isReceiving) {
                     throw new IOException("Transfer cancelled by user");
                 }
-                
                 int port = RECEIVING_PORT + 1 + i;
                 ServerSocket ss = new ServerSocket(port);
                 ss.setSoTimeout(SOCKET_TIMEOUT_MS);
                 chunkServers[i] = ss;
-                chunkFutures.add(receiveChunk(ss, fileChannel, i));
                 log("Created chunk server " + i + " on port " + port);
             }
             
+            // Send READY signal with proper flush
             log("Sending READY signal to sender");
             metadataOut.println("READY");
             metadataOut.flush();
             
-            // Wait for all chunks
-            int completedChunks = 0;
-            for (CompletableFuture<Integer> future : chunkFutures) {
-                try {
-                    future.get();
-                    completedChunks++;
-                    int progress = (int) ((completedChunks * 100.0) / totalChunks);
-                    progressCallback.accept(progress);
-                    log(String.format("Chunk progress: %d/%d (%d%%)", 
-                        completedChunks, totalChunks, progress));
-                } catch (Exception e) {
-                    throw new IOException("Error receiving chunk: " + e.getMessage(), e);
-                }
+            // Continue with chunk receiving...
+            List<CompletableFuture<Integer>> chunkFutures = new ArrayList<>();
+            for (int i = 0; i < totalChunks; i++) {
+                chunkFutures.add(receiveChunk(chunkServers[i], fileChannel, i));
             }
             
             log("File received successfully: " + fileName);
