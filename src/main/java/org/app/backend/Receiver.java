@@ -16,6 +16,10 @@ import java.util.ArrayList;
 
 public class Receiver {
     private volatile boolean isReceiving = true;
+    private Consumer<String> statusCallback;
+    private ServerSocket[] chunkServers;
+    private Socket currentSocket;
+    private ServerSocket currentServerSocket;
 
     public void setReceiving(boolean receiving) {
         isReceiving = receiving;
@@ -57,29 +61,31 @@ public class Receiver {
     }
 
     public void listenForConnectionRequests(String saveDirectory, Consumer<Integer> progressCallback, Consumer<String> statusCallback) {
+        this.statusCallback = statusCallback;
         try (ServerSocket serverSocket = new ServerSocket(CONNECTION_PORT)) {
-            serverSocket.setSoTimeout(1000);  // Set timeout for accept()
-            statusCallback.accept("Listening for connection requests on port " + CONNECTION_PORT);
+            this.currentServerSocket = serverSocket;
+            serverSocket.setSoTimeout(1000);
+            log("Listening for connection requests on port " + CONNECTION_PORT);
             
             while (isReceiving) {
                 try {
                     Socket socket = serverSocket.accept();
+                    this.currentSocket = socket;
                     handleIncomingConnection(socket, saveDirectory, progressCallback, statusCallback);
                 } catch (SocketTimeoutException e) {
-                    // Check if we should continue listening
                     if (!isReceiving) {
                         break;
                     }
                 } catch (IOException e) {
                     if (isReceiving) {
-                        statusCallback.accept("Connection error: " + e.getMessage());
+                        log("Connection error: " + e.getMessage());
                     }
                 }
             }
             
-            System.out.println("Stopped listening for connection requests");
+            log("Stopped listening for connection requests");
         } catch (IOException e) {
-            statusCallback.accept("Error: " + e.getMessage());
+            log("Error: " + e.getMessage());
         }
     }
 
@@ -158,57 +164,40 @@ public class Receiver {
     public boolean receiveFile(Socket metadataSocket, String saveDirectory,
                                Consumer<Integer> progressCallback,
                                Consumer<String> statusCallback) {
-        ServerSocket[] chunkServers = null;
+        this.chunkServers = null;
         FileChannel fileChannel = null;
         try {
             metadataSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
-
-            // Ensure save directory exists.
+            
             File saveDir = new File(saveDirectory);
             if (!saveDir.exists() && !saveDir.mkdirs()) {
+                log("Failed to create save directory: " + saveDirectory);
                 throw new IOException("Failed to create save directory: " + saveDirectory);
             }
 
             DataInputStream metadataIn = new DataInputStream(new BufferedInputStream(metadataSocket.getInputStream()));
             PrintWriter metadataOut = new PrintWriter(new BufferedOutputStream(metadataSocket.getOutputStream()), true);
 
-            System.out.println("Reading metadata");
+            log("Reading file metadata...");
             
-            // Add check for available bytes before reading
-            if (metadataIn.available() <= 0) {
-                // This is likely a connection test or cleanup connection, not an error
-                System.out.println("No metadata available, skipping connection");
-                return false;
-            }
-
             long fileSize = metadataIn.readLong();
-            // Termination signal: fileSize == -1.
             if (fileSize == -1) {
-                System.out.println("Received termination signal");
+                log("Received termination signal");
                 return true;
             }
-            if (fileSize <= 0) {
-                throw new IOException("Invalid file size: " + fileSize);
-            }
+            
             int totalChunks = metadataIn.readInt();
-            if (totalChunks <= 0) {
-                throw new IOException("Invalid chunk count: " + totalChunks);
-            }
             int nameLength = metadataIn.readInt();
-            if (nameLength <= 0 || nameLength > 1024) {
-                throw new IOException("Invalid filename length: " + nameLength);
-            }
             byte[] nameBytes = new byte[nameLength];
             metadataIn.readFully(nameBytes);
             String fileName = new String(nameBytes, StandardCharsets.UTF_8);
-            if (!isValidFileName(fileName)) {
-                throw new IOException("Invalid filename: " + fileName);
-            }
 
-            System.out.println("Receiving file: " + fileName + " (Size: " + fileSize + " bytes, Chunks: " + totalChunks + ")");
+            log(String.format("Receiving file: %s (Size: %s, Chunks: %d)", 
+                fileName, formatFileSize(fileSize), totalChunks));
+
             File receivedFile = getUniqueFile(new File(saveDirectory, fileName));
+            log("Saving to: " + receivedFile.getAbsolutePath());
             
-            // Open a single FileChannel for the entire transfer
             fileChannel = FileChannel.open(receivedFile.toPath(), 
                 StandardOpenOption.CREATE, 
                 StandardOpenOption.WRITE,
@@ -219,21 +208,21 @@ public class Receiver {
             chunkServers = new ServerSocket[totalChunks];
             List<CompletableFuture<Integer>> chunkFutures = new ArrayList<>();
             
+            log("Creating " + totalChunks + " chunk servers...");
             for (int i = 0; i < totalChunks; i++) {
                 int port = RECEIVING_PORT + 1 + i;
                 ServerSocket ss = new ServerSocket(port);
                 ss.setSoTimeout(SOCKET_TIMEOUT_MS);
                 chunkServers[i] = ss;
-                
-                // Pass FileChannel to receiveChunk
                 chunkFutures.add(receiveChunk(ss, fileChannel, i));
+                log("Created chunk server " + i + " on port " + port);
             }
             
-            // Send READY signal
+            log("Sending READY signal to sender");
             metadataOut.println("READY");
             metadataOut.flush();
             
-            // Wait for all chunks and track progress
+            // Wait for all chunks
             int completedChunks = 0;
             for (CompletableFuture<Integer> future : chunkFutures) {
                 try {
@@ -241,55 +230,20 @@ public class Receiver {
                     completedChunks++;
                     int progress = (int) ((completedChunks * 100.0) / totalChunks);
                     progressCallback.accept(progress);
-                    statusCallback.accept("Receiving file: " + fileName + " (" + progress + "%)");
+                    log(String.format("Chunk progress: %d/%d (%d%%)", 
+                        completedChunks, totalChunks, progress));
                 } catch (Exception e) {
                     throw new IOException("Error receiving chunk: " + e.getMessage(), e);
                 }
             }
             
-            System.out.println("File received successfully: " + fileName);
-            statusCallback.accept("File received successfully: " + fileName);
-            try {
-                metadataIn.close();
-                metadataOut.close();
-            } catch (IOException e) {
-                System.err.println("Error closing metadata streams: " + e.getMessage());
-            }
-            return false;
-        } catch (EOFException e) {
-            // This is likely a connection test or cleanup connection, not an error
-            System.out.println("Connection closed by sender (possibly a test connection)");
+            log("File received successfully: " + fileName);
             return false;
         } catch (Exception e) {
-            String errorMsg = "Error receiving file: " + e.getMessage();
-            System.err.println(errorMsg);
-            e.printStackTrace();
-            statusCallback.accept(errorMsg);
-            try {
-                metadataSocket.close();
-            } catch (IOException closeError) {
-                System.err.println("Error closing socket: " + closeError.getMessage());
-            }
-            return false;
+            log("Error receiving file: " + e.getMessage());
+            throw new RuntimeException(e);
         } finally {
-            if (fileChannel != null) {
-                try {
-                    fileChannel.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-            if (chunkServers != null) {
-                for (ServerSocket ss : chunkServers) {
-                    if (ss != null && !ss.isClosed()) {
-                        try {
-                            ss.close();
-                        } catch (IOException e) {
-                            e.printStackTrace();
-                        }
-                    }
-                }
-            }
+            closeResources(fileChannel);
         }
     }
 
@@ -319,6 +273,11 @@ public class Receiver {
                 
                 synchronized (fileChannel) {
                     while (totalBytesRead < chunkSize) {
+                        // Add periodic cancellation check
+                        if (!isReceiving) {
+                            throw new IOException("Transfer cancelled by user");
+                        }
+                        
                         buffer.clear();
                         int bytesToRead = Math.min(buffer.capacity(), chunkSize - totalBytesRead);
                         int bytesRead = chunkIn.read(buffer.array(), 0, bytesToRead);
@@ -371,5 +330,67 @@ public class Receiver {
             newFile = new File(parent, baseName + "_" + count++ + extension);
         } while (newFile.exists());
         return newFile;
+    }
+
+    private void log(String message) {
+        if (statusCallback != null) {
+            statusCallback.accept(message);
+        }
+        System.out.println(message);
+    }
+
+    private String formatFileSize(long size) {
+        if (size < 1024) return size + " B";
+        int z = (63 - Long.numberOfLeadingZeros(size)) / 10;
+        return String.format("%.1f %sB", (double)size / (1L << (z*10)), " KMGTPE".charAt(z));
+    }
+
+    // Add this method to handle cleanup when stopping
+    public void stopReceiving() {
+        isReceiving = false;
+        log("Stopping receiver...");
+        try {
+            if (currentSocket != null && !currentSocket.isClosed()) {
+                currentSocket.close();
+                log("Closed current connection socket");
+            }
+            if (currentServerSocket != null && !currentServerSocket.isClosed()) {
+                currentServerSocket.close();
+                log("Closed main server socket");
+            }
+            if (chunkServers != null) {
+                for (int i = 0; i < chunkServers.length; i++) {
+                    ServerSocket server = chunkServers[i];
+                    if (server != null && !server.isClosed()) {
+                        server.close();
+                        log("Closed chunk server " + i);
+                    }
+                }
+            }
+            log("Receiver stopped successfully");
+        } catch (IOException e) {
+            log("Error while stopping receiver: " + e.getMessage());
+        }
+    }
+
+    private void closeResources(FileChannel fileChannel) {
+        if (fileChannel != null) {
+            try {
+                fileChannel.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        if (chunkServers != null) {
+            for (ServerSocket ss : chunkServers) {
+                if (ss != null && !ss.isClosed()) {
+                    try {
+                        ss.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+        }
     }
 }

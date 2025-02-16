@@ -455,6 +455,19 @@ public class FileSharingApp {
         transfersPanel.removeAll();
         transfersPanel.add(mainProgressPanel);
         transfersPanel.setVisible(true);
+        
+        // Add cancel button to the progress panel
+        JButton cancelButton = ModernTheme.createAccentButton("Cancel");
+        cancelButton.addActionListener(e -> {
+            transferManager.stopReceiving();
+            mainProgressPanel.updateStatus("Transfer cancelled");
+            transfersPanel.setVisible(false);
+            transfersPanel.removeAll();
+            frame.revalidate();
+            frame.repaint();
+        });
+        mainProgressPanel.addCancelButton(cancelButton);
+        
         frame.revalidate();
         frame.repaint();
 
@@ -465,13 +478,16 @@ public class FileSharingApp {
                     if (progress == -1) {
                         mainProgressPanel.updateStatus("Starting transfer...");
                         mainProgressPanel.updateProgress(0);
+                        mainProgressPanel.addLog("Starting file transfer");
                     } else {
                         mainProgressPanel.updateProgress(progress);
+                        mainProgressPanel.addLog("Transfer progress: " + progress + "%");
                     }
                 });
             },
             status -> {
                 SwingUtilities.invokeLater(() -> {
+                    mainProgressPanel.addLog(status);
                     if (status.contains("Connection request from")) {
                         String senderName = status.substring(status.indexOf("from") + 5);
                         int option = JOptionPane.showConfirmDialog(frame,
@@ -482,6 +498,15 @@ public class FileSharingApp {
                         if (option == JOptionPane.YES_OPTION) {
                             mainProgressPanel.updateStatus("Receiving files from " + senderName);
                             mainProgressPanel.updateCounter(0, 0);
+                            mainProgressPanel.addLog("Accepted connection from " + senderName);
+                        } else {
+                            transferManager.stopReceiving();
+                            mainProgressPanel.updateStatus("Transfer rejected");
+                            mainProgressPanel.addLog("Rejected connection from " + senderName);
+                            transfersPanel.setVisible(false);
+                            transfersPanel.removeAll();
+                            frame.revalidate();
+                            frame.repaint();
                         }
                     } else if (status.startsWith("Receiving file:")) {
                         String fileName = status.substring(status.indexOf(":") + 1).trim();
@@ -493,6 +518,8 @@ public class FileSharingApp {
                         mainProgressPanel.updateCounter(current, total);
                         if (current == total) {
                             mainProgressPanel.updateStatus("Transfer complete");
+                            mainProgressPanel.addLog("Transfer completed successfully");
+                            cancelButton.setEnabled(false);
                         }
                     } else if (status.contains("Total files:")) {
                         String[] parts = status.split(":");
@@ -552,6 +579,11 @@ public class FileSharingApp {
         private final JLabel statusLabel;
         private final JLabel counterLabel;
         private final String transferId;
+        private JButton cancelButton;
+        private JTextArea logArea;
+        private JScrollPane logScrollPane;
+        private JButton toggleLogButton;
+        private boolean isLogVisible = false;
         
         public TransferProgressPanel(String title, String transferId) {
             this.transferId = transferId;
@@ -561,22 +593,66 @@ public class FileSharingApp {
                 BorderFactory.createEmptyBorder(10, 10, 10, 10)
             ));
             
-            JPanel infoPanel = new JPanel(new MigLayout("fillx, gap 2", "[grow]"));
+            // Main info panel
+            JPanel infoPanel = new JPanel(new MigLayout("fillx, gap 2", "[grow][]"));
             infoPanel.setOpaque(false);
+            
+            // Status and counter panel
+            JPanel statusPanel = new JPanel(new MigLayout("fillx, gap 2", "[grow][]"));
+            statusPanel.setOpaque(false);
             
             statusLabel = new JLabel(title);
             statusLabel.setFont(AppTheme.REGULAR_FONT.deriveFont(Font.BOLD));
             counterLabel = new JLabel("");
             counterLabel.setForeground(Color.GRAY);
             
+            statusPanel.add(statusLabel, "split 2");
+            statusPanel.add(counterLabel, "gapleft 10");
+            
+            // Progress bar
             progressBar = new JProgressBar(0, 100);
             progressBar.setStringPainted(true);
             
-            infoPanel.add(statusLabel, "split 2");
-            infoPanel.add(counterLabel, "gapleft 10");
-            infoPanel.add(progressBar, "newline, growx");
+            // Toggle log button
+            toggleLogButton = ModernTheme.createIconButton("📋");
+            toggleLogButton.setToolTipText("Show/Hide Logs");
+            toggleLogButton.addActionListener(e -> toggleLog());
             
-            add(infoPanel, "grow");
+            // Log area
+            logArea = new JTextArea();
+            logArea.setEditable(false);
+            logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
+            logArea.setBackground(new Color(245, 245, 245));
+            logArea.setForeground(new Color(60, 60, 60));
+            
+            logScrollPane = new JScrollPane(logArea);
+            logScrollPane.setPreferredSize(new Dimension(0, 150));
+            logScrollPane.setVisible(false);
+            
+            // Add components
+            infoPanel.add(statusPanel, "grow");
+            infoPanel.add(toggleLogButton);
+            
+            add(infoPanel, "grow, wrap");
+            add(progressBar, "grow, wrap");
+            add(logScrollPane, "grow, wrap");
+        }
+        
+        private void toggleLog() {
+            isLogVisible = !isLogVisible;
+            logScrollPane.setVisible(isLogVisible);
+            toggleLogButton.setText(isLogVisible ? "📋" : "📋");
+            revalidate();
+            repaint();
+        }
+        
+        public void addLog(String message) {
+            SwingUtilities.invokeLater(() -> {
+                logArea.append(String.format("[%s] %s%n", 
+                    new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date()),
+                    message));
+                logArea.setCaretPosition(logArea.getDocument().getLength());
+            });
         }
         
         public void updateProgress(int progress) {
@@ -590,6 +666,16 @@ public class FileSharingApp {
         
         public void updateCounter(int current, int total) {
             counterLabel.setText(String.format("(%d/%d)", current, total));
+        }
+        
+        public void addCancelButton(JButton button) {
+            this.cancelButton = button;
+            JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+            buttonPanel.setOpaque(false);
+            buttonPanel.add(button);
+            add(buttonPanel, "gapbefore push, wrap");
+            revalidate();
+            repaint();
         }
     }
 
@@ -647,6 +733,13 @@ public class FileSharingApp {
             files.length > 1 ? files.length + " files" : files[0].getName(),
             transferId
         );
+        
+        progressPanel.addLog("Starting file transfer to " + receiver.getUsername());
+        progressPanel.addLog("Number of files: " + files.length);
+        for (File file : files) {
+            progressPanel.addLog("File to send: " + file.getName() + " (" + 
+                formatFileSize(file.length()) + ")");
+        }
         
         activeTransfers.put(transferId, progressPanel);
         transfersPanel.add(progressPanel);
@@ -708,5 +801,12 @@ public class FileSharingApp {
 
     private boolean isDragAcceptable(DropTargetDragEvent event) {
         return event.isDataFlavorSupported(DataFlavor.javaFileListFlavor);
+    }
+
+    // Helper method to format file sizes
+    private String formatFileSize(long size) {
+        if (size < 1024) return size + " B";
+        int z = (63 - Long.numberOfLeadingZeros(size)) / 10;
+        return String.format("%.1f %sB", (double)size / (1L << (z*10)), " KMGTPE".charAt(z));
     }
 }

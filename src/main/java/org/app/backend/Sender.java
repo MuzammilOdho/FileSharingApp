@@ -75,10 +75,13 @@ public class Sender {
      * Sends a file to the receiver.
      * @param isLastFile indicates if this is the final file (termination signal will be sent only then).
      */
-    public void sendFile(String receiverIP, File file, Consumer<Integer> progressCallback, boolean isLastFile) {
+    public void sendFile(String receiverIP, File file, Consumer<Integer> progressCallback, 
+                        Consumer<String> statusCallback, boolean isLastFile) {
         try {
+            statusCallback.accept("Connecting to receiver at " + receiverIP);
             Socket metadataSocket = new Socket(receiverIP, RECEIVER_PORT);
             metadataSocket.setSoTimeout(30000);
+
             try (DataOutputStream metadataOut = new DataOutputStream(
                     new BufferedOutputStream(metadataSocket.getOutputStream()));
                  BufferedReader metadataIn = new BufferedReader(
@@ -88,7 +91,11 @@ public class Sender {
                 int optimalChunkSize = calculateOptimalChunkSize(fileSize);
                 int totalChunks = (int) Math.ceil((double) fileSize / optimalChunkSize);
 
-                // Send file metadata: fileSize, totalChunks, filename length and name.
+                statusCallback.accept(String.format("Preparing to send: %s (Size: %s)", 
+                    file.getName(), formatFileSize(fileSize)));
+                statusCallback.accept("Dividing file into " + totalChunks + " chunks");
+
+                // Send metadata
                 metadataOut.writeLong(fileSize);
                 metadataOut.writeInt(totalChunks);
                 byte[] nameBytes = file.getName().getBytes(StandardCharsets.UTF_8);
@@ -96,28 +103,27 @@ public class Sender {
                 metadataOut.write(nameBytes);
                 metadataOut.flush();
 
-                // Wait for READY signal from the receiver.
+                statusCallback.accept("Waiting for receiver ready signal...");
                 String response = waitForResponse(metadataIn, 30000);
                 if (!"READY".equals(response)) {
                     throw new IOException("Receiver not ready: " + response);
                 }
-                Thread.sleep(3000);
-                // Send file chunks in parallel.
-                sendFileChunks(receiverIP, file, totalChunks, optimalChunkSize, progressCallback);
+                statusCallback.accept("Receiver ready, starting transfer");
 
-                // If this is the last file, send a termination signal.
+                // Send chunks
+                sendFileChunks(receiverIP, file, totalChunks, optimalChunkSize, 
+                    progressCallback, statusCallback);
+
                 if (isLastFile) {
+                    statusCallback.accept("Sending termination signal");
                     try (Socket completionSocket = new Socket(receiverIP, RECEIVER_PORT)) {
                         DataOutputStream completionOut = new DataOutputStream(completionSocket.getOutputStream());
                         completionOut.writeLong(-1);
-                        System.out.println("Sent termination signal");
                     }
                 }
-            } finally {
-                metadataSocket.close();
             }
         } catch (Exception e) {
-            System.err.println("Error in file transfer: " + e.getMessage());
+            statusCallback.accept("Error in file transfer: " + e.getMessage());
             throw new RuntimeException(e);
         }
     }
@@ -126,32 +132,39 @@ public class Sender {
      * Sends file chunks in parallel using an ExecutorService.
      * Each chunk is sent over its own SocketChannel.
      */
-    private void sendFileChunks(String receiverIP, File file, int totalChunks, int optimalChunkSize,
-                                Consumer<Integer> progressCallback) throws Exception {
-        // Use a more efficient thread pool size based on available processors
+    private void sendFileChunks(String receiverIP, File file, int totalChunks, 
+                              int optimalChunkSize, Consumer<Integer> progressCallback,
+                              Consumer<String> statusCallback) throws Exception {
         int threadPoolSize = Math.min(totalChunks, 
             Math.max(2, Runtime.getRuntime().availableProcessors()));
+        statusCallback.accept("Using " + threadPoolSize + " threads for parallel transfer");
+        
         ExecutorService chunkExecutor = Executors.newFixedThreadPool(threadPoolSize);
         CompletionService<Integer> completionService = new ExecutorCompletionService<>(chunkExecutor);
         
         try {
-            // Submit tasks for each chunk using a more efficient buffer strategy
             for (int i = 0; i < totalChunks; i++) {
                 final int chunkIndex = i;
                 final long startPosition = (long) i * optimalChunkSize;
-                final int currentChunkSize = (int) Math.min(optimalChunkSize, file.length() - startPosition);
+                final int currentChunkSize = (int) Math.min(optimalChunkSize, 
+                    file.length() - startPosition);
+                
+                statusCallback.accept(String.format("Queuing chunk %d/%d (Size: %s, Position: %d)", 
+                    i + 1, totalChunks, formatFileSize(currentChunkSize), startPosition));
                 
                 completionService.submit(() -> sendSingleChunk(receiverIP, file, chunkIndex, 
-                    startPosition, currentChunkSize, totalChunks));
+                    startPosition, currentChunkSize, totalChunks, statusCallback));
             }
 
-            // Track progress more efficiently
             int completedChunks = 0;
             while (completedChunks < totalChunks) {
                 Future<Integer> future = completionService.take();
-                future.get(); // Will throw if there was an error
+                int chunkIndex = future.get();
                 completedChunks++;
-                progressCallback.accept((int) (((double) completedChunks / totalChunks) * 100));
+                int progress = (int) (((double) completedChunks / totalChunks) * 100);
+                progressCallback.accept(progress);
+                statusCallback.accept(String.format("Completed chunk %d/%d (%d%%)", 
+                    completedChunks, totalChunks, progress));
             }
         } finally {
             shutdownExecutor(chunkExecutor);
@@ -159,7 +172,8 @@ public class Sender {
     }
 
     private Integer sendSingleChunk(String receiverIP, File file, int chunkIndex, 
-                                  long startPosition, int chunkSize, int totalChunks) throws IOException, InterruptedException {
+                                  long startPosition, int chunkSize, int totalChunks,
+                                  Consumer<String> statusCallback) throws IOException, InterruptedException {
         int retryCount = 0;
         int maxRetries = 3;
         IOException lastException = null;
@@ -237,13 +251,21 @@ public class Sender {
     }
 
     private int calculateOptimalChunkSize(long fileSize) {
-        if (fileSize < 16 * 1024 * 1024) {
+        // Base chunk size: 64MB
+        final long BASE_CHUNK_SIZE = 64L * 1024 * 1024;
+        
+        if (fileSize < BASE_CHUNK_SIZE) {
             return (int) fileSize;
         }
+        
+        // For larger files, aim for 8-16 chunks or BASE_CHUNK_SIZE, whichever is larger
         int availableProcessors = Runtime.getRuntime().availableProcessors();
-        int optimalChunks = Math.min(availableProcessors * 2, (int) (fileSize / (16 * 1024 * 1024)));
-        if (optimalChunks < 1) optimalChunks = 1;
-        return (int) Math.max(16 * 1024 * 1024, fileSize / optimalChunks);
+        int targetChunks = Math.min(availableProcessors * 2, 16);
+        long calculatedChunkSize = Math.max(BASE_CHUNK_SIZE, fileSize / targetChunks);
+        
+        // Cap maximum chunk size at 256MB to avoid memory issues
+        long maxChunkSize = 256L * 1024 * 1024;
+        return (int) Math.min(calculatedChunkSize, maxChunkSize);
     }
 
     private String waitForResponse(BufferedReader reader, int timeoutMs) throws IOException {
@@ -266,5 +288,11 @@ public class Sender {
             }
         }
         throw new IOException("Timeout waiting for receiver response");
+    }
+
+    private String formatFileSize(long size) {
+        if (size < 1024) return size + " B";
+        int z = (63 - Long.numberOfLeadingZeros(size)) / 10;
+        return String.format("%.1f %sB", (double)size / (1L << (z*10)), " KMGTPE".charAt(z));
     }
 }

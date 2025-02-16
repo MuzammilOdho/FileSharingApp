@@ -71,7 +71,7 @@ public class FileTransferManager {
                         sender.sendFile(receiver.getIp(), file, progress -> {
                             int overallProgress = (int) (((fileIndex * 100.0) + progress) / files.length);
                             progressCallback.accept(overallProgress);
-                        }, isLastFile);
+                        }, statusCallback, isLastFile);
                         
                         statusCallback.accept(String.format("Completed %d of %d files", fileIndex + 1, files.length));
                     } catch (Exception e) {
