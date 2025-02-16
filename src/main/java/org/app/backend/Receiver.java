@@ -260,7 +260,6 @@ public class Receiver {
             
             List<CompletableFuture<Integer>> chunkFutures = new ArrayList<>();
             for (int i = 0; i < totalChunks; i++) {
-                final int chunkIndex = i;
                 CompletableFuture<Integer> future = receiveChunk(chunkServers[i], fileChannel, i)
                     .thenApply(index -> {
                         int completed = completedChunks.incrementAndGet();
@@ -275,7 +274,7 @@ public class Receiver {
             // Wait for all chunks with timeout
             try {
                 CompletableFuture.allOf(chunkFutures.toArray(new CompletableFuture[0]))
-                    .get(SOCKET_TIMEOUT_MS * totalChunks, TimeUnit.MILLISECONDS);
+                    .get((long) SOCKET_TIMEOUT_MS * totalChunks, TimeUnit.MILLISECONDS);
             } catch (Exception e) {
                 throw new IOException("Failed to receive all chunks: " + e.getMessage(), e);
             }
@@ -379,7 +378,7 @@ public class Receiver {
                     }
                     // Wait before retry
                     try {
-                        Thread.sleep(1000 * retryCount);
+                        Thread.sleep(1000L * retryCount);
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
                         throw new CompletionException("Interrupted during retry wait", ie);
