@@ -23,11 +23,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.awt.datatransfer.DataFlavor;
 import java.awt.datatransfer.Transferable;
 import java.awt.dnd.*;
-import javax.swing.border.MatteBorder;
-import javax.swing.ImageIcon;
 import com.formdev.flatlaf.FlatLightLaf;
 import com.formdev.flatlaf.themes.FlatMacDarkLaf;
-import com.formdev.flatlaf.util.*;
 import java.awt.Dimension;
 import java.awt.Toolkit;
 import net.miginfocom.swing.MigLayout;
@@ -63,21 +60,21 @@ public class FileSharingApp {
         // Initialize scale factor based on screen resolution
         Dimension screenSize = Toolkit.getDefaultToolkit().getScreenSize();
         scaleFactor = Math.min(screenSize.getWidth() / 1920.0, screenSize.getHeight() / 1080.0);
-        
+
         // Set modern look and feel
         setupLookAndFeel();
-        
+
         transferManager = new FileTransferManager();
         frame = new JFrame("File Sharing");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        
+
         // Use MigLayout for better component positioning
         frame.setLayout(new MigLayout("insets 15, fillx, gap 10", "[grow]", "[]10[]10[]10[]"));
         frame.setSize(900, 600);
         frame.setMinimumSize(new Dimension(800, 500));
-        
+
         activeTransfers = new ConcurrentHashMap<>();
-        
+
         initializeComponents();
         setupGlobalDropTarget();
         frame.setLocationRelativeTo(null);
@@ -117,33 +114,33 @@ public class FileSharingApp {
     private void initializeComponents() {
         // Use MigLayout with better spacing
         frame.setLayout(new MigLayout("insets 15, fillx, gap 10", "[grow]", "[]10[]10[]10[]"));
-        
+
         // Header with status
         JPanel headerPanel = ModernTheme.createRoundedPanel();
         headerPanel.setLayout(new MigLayout("insets 15", "[grow][]10[]"));
-        
+
         JLabel titleLabel = new JLabel("File Sharing");
         titleLabel.setFont(titleLabel.getFont().deriveFont(22f));
         headerPanel.add(titleLabel, "grow");
-        
+
         // Add status indicator
         connectionStatusLabel = new JLabel("●", SwingConstants.CENTER);
         connectionStatusLabel.setForeground(ModernTheme.ACCENT_COLOR);
         connectionStatusLabel.setToolTipText("Ready to transfer");
         headerPanel.add(connectionStatusLabel);
-        
+
         JButton helpButton = ModernTheme.createIconButton("?");
         helpButton.addActionListener(e -> showHelp());
         headerPanel.add(helpButton);
-        
+
         // User info panel with better layout
         JPanel userPanel = ModernTheme.createRoundedPanel();
         userPanel.setLayout(new MigLayout("insets 15, fillx", "[][grow]"));
-        
+
         JLabel nameLabel = new JLabel("Your Name:");
         nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD));
         userPanel.add(nameLabel);
-        
+
         nameField = new JTextField(20);
         nameField.setText(System.getProperty("user.name"));
         nameField.addFocusListener(new FocusAdapter() {
@@ -153,46 +150,46 @@ public class FileSharingApp {
             }
         });
         userPanel.add(nameField, "grow");
-        
+
         // Directory panel with better layout
         JPanel dirPanel = ModernTheme.createRoundedPanel();
         dirPanel.setLayout(new MigLayout("insets 15, fillx", "[][grow][]"));
-        
+
         JLabel dirLabel = new JLabel("Save Location:");
         dirLabel.setFont(dirLabel.getFont().deriveFont(Font.BOLD));
         dirPanel.add(dirLabel);
-        
+
         saveDirectoryField = new JTextField(System.getProperty("user.home"));
         saveDirectoryField.setEditable(false);
         dirPanel.add(saveDirectoryField, "grow");
-        
+
         JButton browseButton = ModernTheme.createAccentButton("Browse");
         browseButton.addActionListener(e -> setSaveDirectory());
         dirPanel.add(browseButton);
-        
+
         // Action buttons with better spacing
         JPanel actionPanel = ModernTheme.createRoundedPanel();
         actionPanel.setLayout(new MigLayout("insets 15", "[grow]10[grow]"));
-        
+
         JButton sendButton = ModernTheme.createAccentButton("Send Files");
         JButton receiveButton = ModernTheme.createAccentButton("Receive Files");
-        
+
         // Add tooltips
         sendButton.setToolTipText("Click to select files or drag and drop anywhere");
         receiveButton.setToolTipText("Start receiving files from other users");
-        
+
         sendButton.addActionListener(e -> openFileSelection());
         receiveButton.addActionListener(e -> waitForIncomingConnection());
-        
+
         actionPanel.add(sendButton, "grow");
         actionPanel.add(receiveButton, "grow");
-        
+
         // Add components to frame with proper spacing
         frame.add(headerPanel, "grow, wrap");
         frame.add(userPanel, "grow, wrap");
         frame.add(dirPanel, "grow, wrap");
         frame.add(actionPanel, "grow, wrap");
-        
+
         // Add transfers panel at the bottom
         transfersPanel = new JPanel();
         transfersPanel.setLayout(new BoxLayout(transfersPanel, BoxLayout.Y_AXIS));
@@ -212,18 +209,18 @@ public class FileSharingApp {
                     dtde.rejectDrag();
                 }
             }
-            
+
             @Override
             public void dragExit(DropTargetEvent dte) {
                 frame.getRootPane().setBorder(null);
             }
-            
+
             @Override
             public void drop(DropTargetDropEvent dtde) {
                 try {
                     frame.getRootPane().setBorder(null);
                     Transferable tr = dtde.getTransferable();
-                    
+
                     if (tr.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
                         dtde.acceptDrop(DnDConstants.ACTION_COPY);
                         List<File> fileList = (List<File>) tr.getTransferData(DataFlavor.javaFileListFlavor);
@@ -260,7 +257,7 @@ public class FileSharingApp {
             </ol>
             </html>
             """;
-        
+
         JOptionPane.showMessageDialog(frame,
             helpMessage,
             "Help",
@@ -281,12 +278,12 @@ public class FileSharingApp {
                     JOptionPane.WARNING_MESSAGE);
             return;
         }
-        
+
         user.setUsername(nameField.getText());
         JFileChooser fileChooser = new JFileChooser();
         fileChooser.setMultiSelectionEnabled(true);
         int result = fileChooser.showOpenDialog(frame);
-        
+
         if (result == JFileChooser.APPROVE_OPTION) {
             files = fileChooser.getSelectedFiles();
             startReceiverDiscovery(files);
@@ -309,7 +306,7 @@ public class FileSharingApp {
         statusLabel.setFont(AppTheme.REGULAR_FONT);
         JProgressBar searchProgress = new JProgressBar();
         searchProgress.setIndeterminate(true);
-        
+
         statusPanel.add(statusLabel, BorderLayout.CENTER);
         statusPanel.add(searchProgress, BorderLayout.SOUTH);
 
@@ -322,7 +319,7 @@ public class FileSharingApp {
         // Buttons
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
         buttonPanel.setBackground(AppTheme.SECONDARY_COLOR);
-        
+
         JButton connectButton = AppTheme.createStyledButton("Connect");
         JButton cancelButton = AppTheme.createStyledButton("Cancel");
         JButton retryButton = AppTheme.createStyledButton("Retry");
@@ -332,11 +329,11 @@ public class FileSharingApp {
         buttonPanel.add(retryButton);
         buttonPanel.add(connectButton);
         buttonPanel.add(cancelButton);
-        
+
         mainPanel.add(statusPanel, BorderLayout.NORTH);
         mainPanel.add(new JScrollPane(receiverPanel), BorderLayout.CENTER);
         mainPanel.add(buttonPanel, BorderLayout.SOUTH);
-        
+
         discoveryDialog.add(mainPanel);
 
         // Handle discovery process
@@ -378,7 +375,7 @@ public class FileSharingApp {
 
         // Start discovery
         startDiscovery(availableReceivers, receiverPanel, group, statusLabel);
-        
+
         discoveryDialog.setVisible(true);
     }
 
@@ -386,16 +383,16 @@ public class FileSharingApp {
         JDialog waitDialog = new JDialog(frame, "Connecting", true);
         waitDialog.setSize(scale(300), scale(150));
         waitDialog.setLocationRelativeTo(frame);
-        
+
         JPanel panel = new JPanel(new BorderLayout(scale(10), scale(10)));
         panel.setBorder(BorderFactory.createEmptyBorder(scale(10), scale(10), scale(10), scale(10)));
         panel.setBackground(AppTheme.SECONDARY_COLOR);
-        
+
         JLabel statusLabel = new JLabel("Sending connection request...");
         statusLabel.setFont(AppTheme.REGULAR_FONT);
         JProgressBar progress = new JProgressBar();
         progress.setIndeterminate(true);
-        
+
         panel.add(statusLabel, BorderLayout.CENTER);
         panel.add(progress, BorderLayout.SOUTH);
         waitDialog.add(panel);
@@ -412,7 +409,7 @@ public class FileSharingApp {
                 try {
                     boolean accepted = get();
                     waitDialog.dispose();
-                    
+
                     if (accepted) {
                         startFileTransfer(receiver, files);
                     } else {
@@ -429,7 +426,7 @@ public class FileSharingApp {
                         "Connection Error",
                         JOptionPane.YES_NO_OPTION,
                         JOptionPane.ERROR_MESSAGE);
-                        
+
                     if (choice == JOptionPane.YES_OPTION) {
                         startReceiverDiscovery(files);
                     }
@@ -455,7 +452,7 @@ public class FileSharingApp {
         transfersPanel.removeAll();
         transfersPanel.add(mainProgressPanel);
         transfersPanel.setVisible(true);
-        
+
         // Add cancel button to the progress panel
         JButton cancelButton = ModernTheme.createAccentButton("Cancel");
         cancelButton.addActionListener(e -> {
@@ -467,7 +464,7 @@ public class FileSharingApp {
             frame.repaint();
         });
         mainProgressPanel.addCancelButton(cancelButton);
-        
+
         frame.revalidate();
         frame.repaint();
 
@@ -494,7 +491,7 @@ public class FileSharingApp {
                             "Accept file transfer from " + senderName + "?",
                             "Connection Request",
                             JOptionPane.YES_NO_OPTION);
-                        
+
                         if (option == JOptionPane.YES_OPTION) {
                             mainProgressPanel.updateStatus("Receiving files from " + senderName);
                             mainProgressPanel.updateCounter(0, 0);
@@ -535,7 +532,7 @@ public class FileSharingApp {
         JFileChooser fileChooser = new JFileChooser();
         fileChooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
         fileChooser.setDialogTitle("Select Save Directory");
-        
+
         if (fileChooser.showOpenDialog(frame) == JFileChooser.APPROVE_OPTION) {
             File selectedDir = fileChooser.getSelectedFile();
             if (!selectedDir.exists() && !selectedDir.mkdirs()) {
@@ -563,7 +560,7 @@ public class FileSharingApp {
     private void toggleTransfersPanel(JButton toggleButton) {
         isTransfersPanelExpanded = !isTransfersPanelExpanded;
         toggleButton.setText(isTransfersPanelExpanded ? "▼" : "▶");
-        
+
         for (Component comp : transfersPanel.getComponents()) {
             if (comp instanceof TransferProgressPanel) {
                 comp.setVisible(isTransfersPanelExpanded);
@@ -584,7 +581,7 @@ public class FileSharingApp {
         private JScrollPane logScrollPane;
         private JButton toggleLogButton;
         private boolean isLogVisible = false;
-        
+
         public TransferProgressPanel(String title, String transferId) {
             this.transferId = transferId;
             setLayout(new MigLayout("fillx, insets 5", "[grow][]"));
@@ -592,52 +589,52 @@ public class FileSharingApp {
                 BorderFactory.createLineBorder(ModernTheme.BORDER_COLOR, 1, true),
                 BorderFactory.createEmptyBorder(10, 10, 10, 10)
             ));
-            
+
             // Main info panel
             JPanel infoPanel = new JPanel(new MigLayout("fillx, gap 2", "[grow][]"));
             infoPanel.setOpaque(false);
-            
+
             // Status and counter panel
             JPanel statusPanel = new JPanel(new MigLayout("fillx, gap 2", "[grow][]"));
             statusPanel.setOpaque(false);
-            
+
             statusLabel = new JLabel(title);
             statusLabel.setFont(AppTheme.REGULAR_FONT.deriveFont(Font.BOLD));
             counterLabel = new JLabel("");
             counterLabel.setForeground(Color.GRAY);
-            
+
             statusPanel.add(statusLabel, "split 2");
             statusPanel.add(counterLabel, "gapleft 10");
-            
+
             // Progress bar
             progressBar = new JProgressBar(0, 100);
             progressBar.setStringPainted(true);
-            
+
             // Toggle log button
             toggleLogButton = ModernTheme.createIconButton("📋");
             toggleLogButton.setToolTipText("Show/Hide Logs");
             toggleLogButton.addActionListener(e -> toggleLog());
-            
+
             // Log area
             logArea = new JTextArea();
             logArea.setEditable(false);
             logArea.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 12));
             logArea.setBackground(new Color(245, 245, 245));
             logArea.setForeground(new Color(60, 60, 60));
-            
+
             logScrollPane = new JScrollPane(logArea);
             logScrollPane.setPreferredSize(new Dimension(0, 150));
             logScrollPane.setVisible(false);
-            
+
             // Add components
             infoPanel.add(statusPanel, "grow");
             infoPanel.add(toggleLogButton);
-            
+
             add(infoPanel, "grow, wrap");
             add(progressBar, "grow, wrap");
             add(logScrollPane, "grow, wrap");
         }
-        
+
         private void toggleLog() {
             isLogVisible = !isLogVisible;
             logScrollPane.setVisible(isLogVisible);
@@ -645,29 +642,29 @@ public class FileSharingApp {
             revalidate();
             repaint();
         }
-        
+
         public void addLog(String message) {
             SwingUtilities.invokeLater(() -> {
-                logArea.append(String.format("[%s] %s%n", 
+                logArea.append(String.format("[%s] %s%n",
                     new java.text.SimpleDateFormat("HH:mm:ss").format(new java.util.Date()),
                     message));
                 logArea.setCaretPosition(logArea.getDocument().getLength());
             });
         }
-        
+
         public void updateProgress(int progress) {
             progressBar.setValue(progress);
             progressBar.setString(progress + "%");
         }
-        
+
         public void updateStatus(String status) {
             statusLabel.setText(status);
         }
-        
+
         public void updateCounter(int current, int total) {
             counterLabel.setText(String.format("(%d/%d)", current, total));
         }
-        
+
         public void addCancelButton(JButton button) {
             this.cancelButton = button;
             JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
@@ -696,12 +693,12 @@ public class FileSharingApp {
     }
 
     // Helper method to start discovery
-    private void startDiscovery(List<User> availableReceivers, JPanel receiverPanel, 
+    private void startDiscovery(List<User> availableReceivers, JPanel receiverPanel,
                               ButtonGroup group, JLabel statusLabel) {
         transferManager.startDiscovery(availableReceivers, users -> {
             SwingUtilities.invokeLater(() -> {
                 receiverPanel.removeAll();
-                
+
                 if (users.isEmpty()) {
                     JLabel noReceiversLabel = new JLabel("No receivers found yet...");
                     noReceiversLabel.setFont(AppTheme.REGULAR_FONT);
@@ -717,7 +714,7 @@ public class FileSharingApp {
                         }
                     }
                 }
-                
+
                 receiverPanel.revalidate();
                 receiverPanel.repaint();
                 statusLabel.setText("Found " + users.size() + " receiver(s)");
@@ -733,25 +730,25 @@ public class FileSharingApp {
             files.length > 1 ? files.length + " files" : files[0].getName(),
             transferId
         );
-        
+
         progressPanel.addLog("Starting file transfer to " + receiver.getUsername());
         progressPanel.addLog("Number of files: " + files.length);
         for (File file : files) {
-            progressPanel.addLog("File to send: " + file.getName() + " (" + 
+            progressPanel.addLog("File to send: " + file.getName() + " (" +
                 formatFileSize(file.length()) + ")");
         }
-        
+
         activeTransfers.put(transferId, progressPanel);
         transfersPanel.add(progressPanel);
         transfersPanel.setVisible(true);
-        
+
         if (!isTransfersPanelExpanded) {
             progressPanel.setVisible(false);
         }
-        
+
         frame.revalidate();
         frame.repaint();
-        
+
         transferManager.startSendingFiles(
             receiver,
             user.getUsername(),
@@ -783,19 +780,19 @@ public class FileSharingApp {
         ));
         button.setFocusPainted(false);
         button.setCursor(new Cursor(Cursor.HAND_CURSOR));
-        
+
         button.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseEntered(MouseEvent e) {
                 button.setBackground(AppTheme.BUTTON_HOVER_COLOR);
             }
-            
+
             @Override
             public void mouseExited(MouseEvent e) {
                 button.setBackground(AppTheme.BUTTON_COLOR);
             }
         });
-        
+
         return button;
     }
 

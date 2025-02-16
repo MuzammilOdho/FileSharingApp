@@ -16,6 +16,7 @@ import java.util.ArrayList;
 
 public class Receiver {
     private volatile boolean isReceiving = true;
+    private volatile boolean isAcceptingConnections = true;
     private Consumer<String> statusCallback;
     private ServerSocket[] chunkServers;
     private Socket currentSocket;
@@ -23,6 +24,9 @@ public class Receiver {
 
     public void setReceiving(boolean receiving) {
         isReceiving = receiving;
+        if (!receiving) {
+            isAcceptingConnections = false;
+        }
     }
 
     private static final int RECEIVING_PORT = 9090;
@@ -67,17 +71,17 @@ public class Receiver {
             serverSocket.setSoTimeout(1000);
             log("Listening for connection requests on port " + CONNECTION_PORT);
             
-            while (isReceiving) {
+            while (isAcceptingConnections) {
                 try {
                     Socket socket = serverSocket.accept();
                     this.currentSocket = socket;
                     handleIncomingConnection(socket, saveDirectory, progressCallback, statusCallback);
                 } catch (SocketTimeoutException e) {
-                    if (!isReceiving) {
+                    if (!isAcceptingConnections) {
                         break;
                     }
                 } catch (IOException e) {
-                    if (isReceiving) {
+                    if (isAcceptingConnections) {
                         log("Connection error: " + e.getMessage());
                     }
                 }
@@ -108,14 +112,14 @@ public class Receiver {
                 statusCallback.accept("Connection accepted. Waiting for sender...");
                 System.out.println("Connection accepted. Waiting for sender...");
 
-                // Stop further connections for this session.
-                isReceiving = false;
+                // Stop accepting new connections but allow current transfer
+                isAcceptingConnections = false;
                 System.out.println("File receiver server started on port " + RECEIVING_PORT);
 
                 // Loop to receive multiple files until termination signal is received.
                 try (ServerSocket fileSocket = new ServerSocket(RECEIVING_PORT)) {
                     fileSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
-                    while (true) {
+                    while (isReceiving) {
                         try (Socket transferSocket = fileSocket.accept()) {
                             transferSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
 
@@ -136,14 +140,18 @@ public class Receiver {
                                 break;
                             }
                         } catch (Exception e) {
-                            System.err.println("Error in file transfer: " + e.getMessage());
+                            if (isReceiving) {
+                                System.err.println("Error in file transfer: " + e.getMessage());
+                            }
                             break;
                         }
                     }
-                    JOptionPane.showMessageDialog(null,
-                            "All files received successfully!",
-                            "Transfer Complete",
-                            JOptionPane.INFORMATION_MESSAGE);
+                    if (isReceiving) {
+                        JOptionPane.showMessageDialog(null,
+                                "All files received successfully!",
+                                "Transfer Complete",
+                                JOptionPane.INFORMATION_MESSAGE);
+                    }
                 } catch (Exception e) {
                     System.err.println("Error in file receiver server: " + e.getMessage());
                 }
@@ -204,12 +212,22 @@ public class Receiver {
                 StandardOpenOption.READ);
             fileChannel.truncate(fileSize);
 
+            // Check if receiving was cancelled before creating chunk servers
+            if (!isReceiving) {
+                log("Transfer cancelled before starting");
+                throw new IOException("Transfer cancelled by user");
+            }
+
             // Create chunk servers
             chunkServers = new ServerSocket[totalChunks];
             List<CompletableFuture<Integer>> chunkFutures = new ArrayList<>();
             
             log("Creating " + totalChunks + " chunk servers...");
             for (int i = 0; i < totalChunks; i++) {
+                if (!isReceiving) {
+                    throw new IOException("Transfer cancelled by user");
+                }
+                
                 int port = RECEIVING_PORT + 1 + i;
                 ServerSocket ss = new ServerSocket(port);
                 ss.setSoTimeout(SOCKET_TIMEOUT_MS);
@@ -240,7 +258,13 @@ public class Receiver {
             log("File received successfully: " + fileName);
             return false;
         } catch (Exception e) {
-            log("Error receiving file: " + e.getMessage());
+            String errorMsg = "Error receiving file: " + e.getMessage();
+            log(errorMsg);
+            if (e.getMessage().contains("Transfer cancelled")) {
+                statusCallback.accept("Transfer cancelled");
+            } else {
+                statusCallback.accept("Error: " + errorMsg);
+            }
             throw new RuntimeException(e);
         } finally {
             closeResources(fileChannel);
@@ -348,16 +372,10 @@ public class Receiver {
     // Add this method to handle cleanup when stopping
     public void stopReceiving() {
         isReceiving = false;
+        isAcceptingConnections = false;
         log("Stopping receiver...");
         try {
-            if (currentSocket != null && !currentSocket.isClosed()) {
-                currentSocket.close();
-                log("Closed current connection socket");
-            }
-            if (currentServerSocket != null && !currentServerSocket.isClosed()) {
-                currentServerSocket.close();
-                log("Closed main server socket");
-            }
+            // Close all resources in reverse order
             if (chunkServers != null) {
                 for (int i = 0; i < chunkServers.length; i++) {
                     ServerSocket server = chunkServers[i];
@@ -366,7 +384,21 @@ public class Receiver {
                         log("Closed chunk server " + i);
                     }
                 }
+                chunkServers = null;
             }
+            
+            if (currentSocket != null && !currentSocket.isClosed()) {
+                currentSocket.close();
+                log("Closed current connection socket");
+                currentSocket = null;
+            }
+            
+            if (currentServerSocket != null && !currentServerSocket.isClosed()) {
+                currentServerSocket.close();
+                log("Closed main server socket");
+                currentServerSocket = null;
+            }
+            
             log("Receiver stopped successfully");
         } catch (IOException e) {
             log("Error while stopping receiver: " + e.getMessage());

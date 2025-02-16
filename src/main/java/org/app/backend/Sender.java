@@ -12,6 +12,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.StandardOpenOption;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.concurrent.Future;
 
 public class Sender {
     private volatile boolean isListening = true;
@@ -26,6 +29,7 @@ public class Sender {
     // We'll use individual chunk ports starting from RECEIVER_PORT + 1 for parallel transfer.
     // Buffer size remains 8MB (adjust as needed)
     private static final int BUFFER_SIZE = 8 * 1024 * 1024;
+    private static final int CHUNK_SIZE = 64 * 1024 * 1024; // 64MB chunks
 
     public void peerListener(java.util.List<User> discoveredReceivers, Consumer<User> onNewUser) {
         try {
@@ -135,36 +139,53 @@ public class Sender {
     private void sendFileChunks(String receiverIP, File file, int totalChunks, 
                               int optimalChunkSize, Consumer<Integer> progressCallback,
                               Consumer<String> statusCallback) throws Exception {
-        int threadPoolSize = Math.min(totalChunks, 
-            Math.max(2, Runtime.getRuntime().availableProcessors()));
-        statusCallback.accept("Using " + threadPoolSize + " threads for parallel transfer");
-        
-        ExecutorService chunkExecutor = Executors.newFixedThreadPool(threadPoolSize);
+        // Limit concurrent transfers to avoid overwhelming network
+        int maxConcurrentChunks = Math.min(4, Runtime.getRuntime().availableProcessors());
+        ExecutorService chunkExecutor = Executors.newFixedThreadPool(maxConcurrentChunks);
         CompletionService<Integer> completionService = new ExecutorCompletionService<>(chunkExecutor);
         
         try {
+            // Submit all chunk tasks first
+            List<Future<Integer>> futures = new ArrayList<>();
             for (int i = 0; i < totalChunks; i++) {
                 final int chunkIndex = i;
                 final long startPosition = (long) i * optimalChunkSize;
                 final int currentChunkSize = (int) Math.min(optimalChunkSize, 
                     file.length() - startPosition);
                 
-                statusCallback.accept(String.format("Queuing chunk %d/%d (Size: %s, Position: %d)", 
-                    i + 1, totalChunks, formatFileSize(currentChunkSize), startPosition));
+                statusCallback.accept(String.format("Queuing chunk %d/%d", 
+                    chunkIndex + 1, totalChunks));
                 
-                completionService.submit(() -> sendSingleChunk(receiverIP, file, chunkIndex, 
+                Future<Integer> future = completionService.submit(() -> sendSingleChunk(
+                    receiverIP, file, chunkIndex, 
                     startPosition, currentChunkSize, totalChunks, statusCallback));
+                futures.add(future);
             }
 
+            // Track completed chunks for progress updates
             int completedChunks = 0;
             while (completedChunks < totalChunks) {
-                Future<Integer> future = completionService.take();
-                int chunkIndex = future.get();
-                completedChunks++;
-                int progress = (int) (((double) completedChunks / totalChunks) * 100);
-                progressCallback.accept(progress);
-                statusCallback.accept(String.format("Completed chunk %d/%d (%d%%)", 
-                    completedChunks, totalChunks, progress));
+                try {
+                    Future<Integer> completed = completionService.poll(30, TimeUnit.SECONDS);
+                    if (completed == null) {
+                        throw new TimeoutException("Chunk transfer timed out");
+                    }
+                    
+                    int chunkIndex = completed.get();
+                    completedChunks++;
+                    
+                    int progress = (int) ((completedChunks * 100.0) / totalChunks);
+                    progressCallback.accept(progress);
+                    statusCallback.accept(String.format("Completed chunk %d/%d (%d%%)", 
+                        chunkIndex + 1, totalChunks, progress));
+                    
+                } catch (Exception e) {
+                    // Cancel all remaining transfers if any chunk fails
+                    for (Future<Integer> future : futures) {
+                        future.cancel(true);
+                    }
+                    throw new IOException("Transfer failed: " + e.getMessage(), e);
+                }
             }
         } finally {
             shutdownExecutor(chunkExecutor);
@@ -176,15 +197,27 @@ public class Sender {
                                   Consumer<String> statusCallback) throws IOException, InterruptedException {
         int retryCount = 0;
         int maxRetries = 3;
+        int baseDelay = 1000; // 1 second base delay
         IOException lastException = null;
         
         while (retryCount < maxRetries) {
-            try (SocketChannel chunkChannel = SocketChannel.open(
-                    new InetSocketAddress(receiverIP, RECEIVER_PORT + 1 + chunkIndex))) {
-                
-                // Configure socket
+            try (SocketChannel chunkChannel = SocketChannel.open()) {
+                // Configure socket before connecting
                 chunkChannel.socket().setSoTimeout(30000);
                 chunkChannel.socket().setTcpNoDelay(true);
+                
+                // Add exponential backoff for retries
+                if (retryCount > 0) {
+                    int delay = baseDelay * (1 << (retryCount - 1));
+                    Thread.sleep(delay);
+                    statusCallback.accept(String.format("Retrying chunk %d (attempt %d/%d)", 
+                        chunkIndex + 1, retryCount + 1, maxRetries));
+                }
+                
+                // Connect with timeout
+                if (!chunkChannel.connect(new InetSocketAddress(receiverIP, RECEIVER_PORT + 1 + chunkIndex))) {
+                    throw new IOException("Connection timeout");
+                }
                 
                 // Send metadata using heap ByteBuffer
                 ByteBuffer metadataBuffer = ByteBuffer.allocate(20);
@@ -227,15 +260,14 @@ public class Sender {
                 lastException = e;
                 retryCount++;
                 if (retryCount < maxRetries) {
-                    System.out.println("Retry " + retryCount + " for chunk " + chunkIndex + 
-                        " after error: " + e.getMessage());
-                    Thread.sleep(1000 * retryCount); // Exponential backoff
+                    statusCallback.accept(String.format("Chunk %d failed: %s. Retrying...", 
+                        chunkIndex + 1, e.getMessage()));
+                    continue;
                 }
             }
         }
         
-        throw new IOException("Failed to send chunk after " + maxRetries + " retries. Last error: " + 
-            lastException.getMessage(), lastException);
+        throw new IOException("Failed to send chunk after " + maxRetries + " retries", lastException);
     }
 
     private void shutdownExecutor(ExecutorService executor) {
