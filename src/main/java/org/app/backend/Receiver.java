@@ -13,6 +13,7 @@ import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class Receiver {
     private volatile boolean isReceiving = true;
@@ -32,6 +33,7 @@ public class Receiver {
 
     private static final int RECEIVING_PORT = 9090;
     private static final int BUFFER_SIZE = 8 * 1024 * 1024; // 8MB
+    private static final int CHUNK_SIZE = 64 * 1024 * 1024; // 64MB chunks to match Sender
     private static final int CONNECTION_PORT = 9080;
     private static final int BROADCAST_PORT = 9000;
     private static final String BROADCAST_IP = "255.255.255.255";
@@ -253,10 +255,29 @@ public class Receiver {
             metadataOut.println("READY");
             metadataOut.flush();
             
-            // Continue with chunk receiving...
+            // Track completed chunks
+            AtomicInteger completedChunks = new AtomicInteger(0);
+            
             List<CompletableFuture<Integer>> chunkFutures = new ArrayList<>();
             for (int i = 0; i < totalChunks; i++) {
-                chunkFutures.add(receiveChunk(chunkServers[i], fileChannel, i));
+                final int chunkIndex = i;
+                CompletableFuture<Integer> future = receiveChunk(chunkServers[i], fileChannel, i)
+                    .thenApply(index -> {
+                        int completed = completedChunks.incrementAndGet();
+                        int progress = (int)((completed * 100.0) / totalChunks);
+                        progressCallback.accept(progress);
+                        statusCallback.accept(String.format("Received chunk %d/%d", completed, totalChunks));
+                        return index;
+                    });
+                chunkFutures.add(future);
+            }
+            
+            // Wait for all chunks with timeout
+            try {
+                CompletableFuture.allOf(chunkFutures.toArray(new CompletableFuture[0]))
+                    .get(SOCKET_TIMEOUT_MS * totalChunks, TimeUnit.MILLISECONDS);
+            } catch (Exception e) {
+                throw new IOException("Failed to receive all chunks: " + e.getMessage(), e);
             }
             
             log("File received successfully: " + fileName);
@@ -277,33 +298,40 @@ public class Receiver {
 
     private CompletableFuture<Integer> receiveChunk(ServerSocket ss, FileChannel fileChannel, int expectedChunkIndex) {
         return CompletableFuture.supplyAsync(() -> {
-            try (Socket chunkSocket = ss.accept();
-                 DataInputStream chunkIn = new DataInputStream(new BufferedInputStream(chunkSocket.getInputStream()))) {
-                
-                // Read chunk metadata
-                int chunkIndex = chunkIn.readInt();
-                long startPosition = chunkIn.readLong();
-                int chunkSize = chunkIn.readInt();
-                int totalChunks = chunkIn.readInt();
-                
-                // Validate metadata
-                if (chunkIndex != expectedChunkIndex || chunkSize <= 0 || startPosition < 0) {
-                    throw new IOException("Invalid chunk metadata: index=" + chunkIndex + 
-                        ", size=" + chunkSize + ", position=" + startPosition);
-                }
-                
-                System.out.println("Receiving chunk " + chunkIndex + " of " + totalChunks + 
-                    " (size=" + chunkSize + ", position=" + startPosition + ")");
-                
-                // Use heap ByteBuffer instead of direct for reading from InputStream
-                ByteBuffer buffer = ByteBuffer.allocate(Math.min(BUFFER_SIZE, chunkSize));
-                int totalBytesRead = 0;
-                
-                synchronized (fileChannel) {
-                    while (totalBytesRead < chunkSize) {
-                        // Add periodic cancellation check
-                        if (!isReceiving) {
-                            throw new IOException("Transfer cancelled by user");
+            int retryCount = 0;
+            int maxRetries = 3;
+            
+            while (retryCount < maxRetries) {
+                try (Socket chunkSocket = ss.accept()) {
+                    // Configure socket
+                    chunkSocket.setSoTimeout(SOCKET_TIMEOUT_MS);
+                    chunkSocket.setReceiveBufferSize(BUFFER_SIZE);
+                    
+                    DataInputStream chunkIn = new DataInputStream(
+                        new BufferedInputStream(chunkSocket.getInputStream()));
+                    
+                    // Read and validate chunk metadata
+                    int chunkIndex = chunkIn.readInt();
+                    long startPosition = chunkIn.readLong();
+                    int chunkSize = chunkIn.readInt();
+                    int totalChunks = chunkIn.readInt();
+                    
+                    if (chunkIndex != expectedChunkIndex || chunkSize <= 0 || startPosition < 0) {
+                        throw new IOException(String.format(
+                            "Invalid chunk metadata: index=%d (expected %d), size=%d, position=%d",
+                            chunkIndex, expectedChunkIndex, chunkSize, startPosition));
+                    }
+                    
+                    // Use heap ByteBuffer with timeout monitoring
+                    ByteBuffer buffer = ByteBuffer.allocate(Math.min(BUFFER_SIZE, chunkSize));
+                    int totalBytesRead = 0;
+                    long transferStartTime = System.currentTimeMillis();
+                    int stallCount = 0;
+                    
+                    while (totalBytesRead < chunkSize && isReceiving) {
+                        // Check for transfer stall/timeout
+                        if (System.currentTimeMillis() - transferStartTime > SOCKET_TIMEOUT_MS) {
+                            throw new IOException("Chunk transfer timeout");
                         }
                         
                         buffer.clear();
@@ -311,29 +339,54 @@ public class Receiver {
                         int bytesRead = chunkIn.read(buffer.array(), 0, bytesToRead);
                         
                         if (bytesRead == -1) {
-                            break;
+                            throw new IOException("Unexpected end of stream");
                         }
                         
                         buffer.limit(bytesRead);
                         buffer.position(0);
                         
-                        // Write buffer to file at correct position
-                        while (buffer.hasRemaining()) {
-                            fileChannel.write(buffer, startPosition + totalBytesRead);
+                        // Write to file with position tracking
+                        synchronized (fileChannel) {
+                            while (buffer.hasRemaining()) {
+                                int written = fileChannel.write(buffer, startPosition + totalBytesRead);
+                                if (written == 0) {
+                                    stallCount++;
+                                    if (stallCount > 100) {
+                                        throw new IOException("Write operation stalled");
+                                    }
+                                    Thread.sleep(10);
+                                } else {
+                                    stallCount = 0;
+                                    totalBytesRead += written;
+                                    transferStartTime = System.currentTimeMillis(); // Reset timeout
+                                }
+                            }
                         }
-                        totalBytesRead += bytesRead;
+                    }
+                    
+                    if (totalBytesRead != chunkSize) {
+                        throw new IOException(String.format(
+                            "Incomplete chunk transfer: received %d of %d bytes",
+                            totalBytesRead, chunkSize));
+                    }
+                    
+                    return chunkIndex;
+                } catch (Exception e) {
+                    retryCount++;
+                    if (retryCount >= maxRetries) {
+                        throw new CompletionException("Failed to receive chunk after " + maxRetries + 
+                            " attempts: " + e.getMessage(), e);
+                    }
+                    // Wait before retry
+                    try {
+                        Thread.sleep(1000 * retryCount);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new CompletionException("Interrupted during retry wait", ie);
                     }
                 }
-                
-                if (totalBytesRead != chunkSize) {
-                    throw new IOException("Incomplete chunk data: expected=" + chunkSize + 
-                        ", received=" + totalBytesRead);
-                }
-                
-                return chunkIndex;
-            } catch (IOException e) {
-                throw new CompletionException("Error receiving chunk: " + e.getMessage(), e);
             }
+            throw new CompletionException("Exceeded maximum retries", null);
         });
     }
 

@@ -197,24 +197,31 @@ public class Sender {
                                   Consumer<String> statusCallback) throws IOException, InterruptedException {
         int retryCount = 0;
         int maxRetries = 3;
-        int baseDelay = 1000; // 1 second base delay
+        int baseDelay = 2000; // Increased base delay to 2 seconds
         IOException lastException = null;
         
         while (retryCount < maxRetries) {
-            try (SocketChannel chunkChannel = SocketChannel.open()) {
-                // Configure socket before connecting
-                chunkChannel.socket().setSoTimeout(30000);
+            SocketChannel chunkChannel = null;
+            try {
+                chunkChannel = SocketChannel.open();
+                // Configure socket with longer timeout
+                chunkChannel.socket().setSoTimeout(60000); // Increased to 60 seconds
                 chunkChannel.socket().setTcpNoDelay(true);
+                chunkChannel.socket().setReceiveBufferSize(BUFFER_SIZE);
+                chunkChannel.socket().setSendBufferSize(BUFFER_SIZE);
                 
                 // Add exponential backoff for retries
                 if (retryCount > 0) {
                     int delay = baseDelay * (1 << (retryCount - 1));
+                    statusCallback.accept(String.format("Waiting %d seconds before retry %d/%d for chunk %d", 
+                        delay/1000, retryCount + 1, maxRetries, chunkIndex + 1));
                     Thread.sleep(delay);
                     statusCallback.accept(String.format("Retrying chunk %d (attempt %d/%d)", 
                         chunkIndex + 1, retryCount + 1, maxRetries));
                 }
                 
                 // Connect with timeout
+                chunkChannel.configureBlocking(true);
                 if (!chunkChannel.connect(new InetSocketAddress(receiverIP, RECEIVER_PORT + 1 + chunkIndex))) {
                     throw new IOException("Connection timeout");
                 }
@@ -226,48 +233,79 @@ public class Sender {
                              .putInt(chunkSize)
                              .putInt(totalChunks)
                              .flip();
+                
+                long metadataStartTime = System.currentTimeMillis();
                 while (metadataBuffer.hasRemaining()) {
+                    if (System.currentTimeMillis() - metadataStartTime > 30000) { // 30 second timeout
+                        throw new IOException("Metadata send timeout");
+                    }
                     chunkChannel.write(metadataBuffer);
                 }
                 
-                // Use zero-copy transfer for file data
+                // Use zero-copy transfer for file data with timeout monitoring
                 try (FileChannel fileChannel = FileChannel.open(file.toPath(), StandardOpenOption.READ)) {
                     long transferred = 0;
+                    long transferStartTime = System.currentTimeMillis();
+                    int stallCount = 0;
+                    
                     while (transferred < chunkSize) {
+                        // Check for transfer stall
+                        if (System.currentTimeMillis() - transferStartTime > 60000) { // 60 second timeout
+                            throw new IOException("Transfer timeout - no progress for 60 seconds");
+                        }
+                        
+                        long before = transferred;
                         long count = fileChannel.transferTo(
                             startPosition + transferred,
                             chunkSize - transferred,
                             chunkChannel
                         );
+                        
                         if (count <= 0) {
-                            // Add small delay before retry
+                            stallCount++;
+                            if (stallCount > 100) { // Allow up to 100 stalls before timeout
+                                throw new IOException("Transfer stalled");
+                            }
                             Thread.sleep(100);
                             continue;
                         }
+                        
                         transferred += count;
+                        stallCount = 0; // Reset stall counter on successful transfer
+                        transferStartTime = System.currentTimeMillis(); // Reset timeout on progress
                     }
                     
                     if (transferred != chunkSize) {
-                        throw new IOException("Failed to transfer complete chunk data");
+                        throw new IOException("Incomplete chunk transfer: " + transferred + " of " + chunkSize);
                     }
                     
                     return chunkIndex;
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IOException("Transfer interrupted", e);
                 }
             } catch (IOException e) {
                 lastException = e;
+                statusCallback.accept(String.format("Error sending chunk %d: %s", 
+                    chunkIndex + 1, e.getMessage()));
                 retryCount++;
+                
                 if (retryCount < maxRetries) {
-                    statusCallback.accept(String.format("Chunk %d failed: %s. Retrying...", 
-                        chunkIndex + 1, e.getMessage()));
                     continue;
+                }
+            } finally {
+                if (chunkChannel != null) {
+                    try {
+                        chunkChannel.close();
+                    } catch (IOException e) {
+                        // Log close error but don't throw
+                        statusCallback.accept("Warning: Error closing chunk channel: " + e.getMessage());
+                    }
                 }
             }
         }
         
-        throw new IOException("Failed to send chunk after " + maxRetries + " retries", lastException);
+        String errorMsg = String.format("Failed to send chunk %d after %d retries. Last error: %s",
+            chunkIndex + 1, maxRetries, lastException.getMessage());
+        statusCallback.accept(errorMsg);
+        throw new IOException(errorMsg, lastException);
     }
 
     private void shutdownExecutor(ExecutorService executor) {
